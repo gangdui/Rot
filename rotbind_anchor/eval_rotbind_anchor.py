@@ -32,6 +32,7 @@ from rotbind_anchor.rotbind_anchor import (  # noqa: E402
     make_ring_pair_mask,
     remove_rotbind_anchor_rgb,
     rotate_image_keep_size,
+    shift_to_attack_angle,
 )
 
 
@@ -41,6 +42,8 @@ RESULT_FIELDS = [
     "image_path",
     "alpha",
     "theta_gt",
+    "raw_theta_shift",
+    "theta_attack_hat",
     "theta_hat_raw",
     "theta_hat",
     "angle_sign",
@@ -56,6 +59,9 @@ RESULT_FIELDS = [
     "diff_angle_error",
     "diff_best_score",
     "diff_corr_margin",
+    "diff_rot_theta_shift",
+    "diff_rot_attack_hat",
+    "diff_rot_attack_error",
     "diff_rot_theta_hat",
     "diff_rot_angle_error",
     "diff_rot_best_score",
@@ -174,12 +180,12 @@ def normalize_angle(theta: float) -> float:
     return float(theta % 360.0)
 
 
-def apply_angle_sign(theta_raw: float, angle_sign: str) -> float:
-    """Apply raw or neg convention to a detected angle."""
+def apply_angle_sign(theta_shift: float, angle_sign: str, angle_period: float = 180.0) -> float:
+    """Convert a correlation shift into an attack angle using a sign convention."""
     if angle_sign == "raw":
-        return normalize_angle(theta_raw)
+        return shift_to_attack_angle(theta_shift, angle_period=angle_period)
     if angle_sign == "neg":
-        return normalize_angle(-theta_raw)
+        return float(theta_shift % angle_period)
     raise ValueError("angle_sign must be raw or neg")
 
 
@@ -238,11 +244,17 @@ def calibrate_angle_sign(args: argparse.Namespace) -> tuple[str, dict[str, float
         x_anchor = embed_rotbind_anchor_rgb(img, modulation_grid, alpha)
         for theta_gt in angles:
             x_att = rotate_image_keep_size(x_anchor, theta_gt)
-            theta_raw, _, _, _ = detect_rotbind_angle(x_att, metadata, num_r=int(args.num_r))
-            raw_theta = apply_angle_sign(theta_raw, "raw")
-            neg_theta = apply_angle_sign(theta_raw, "neg")
-            raw_errors.append(circular_angle_error(raw_theta, theta_gt, period=360.0))
-            neg_errors.append(circular_angle_error(neg_theta, theta_gt, period=360.0))
+            angle_period = 180.0 if bool(metadata.get("pi_periodic", True)) else 360.0
+            theta_shift, _, _, _ = detect_rotbind_angle(
+                x_att,
+                metadata,
+                num_r=int(args.num_r),
+                resolve_ambiguity=False,
+            )
+            raw_theta = apply_angle_sign(theta_shift, "raw", angle_period=angle_period)
+            neg_theta = apply_angle_sign(theta_shift, "neg", angle_period=angle_period)
+            raw_errors.append(circular_angle_error(raw_theta, theta_gt, period=angle_period))
+            neg_errors.append(circular_angle_error(neg_theta, theta_gt, period=angle_period))
 
     raw_mean = float(np.mean(raw_errors)) if raw_errors else float("nan")
     neg_mean = float(np.mean(neg_errors)) if neg_errors else float("nan")
@@ -295,15 +307,19 @@ def diagnostic_diff_feature(
     diff_feature = polar_anchor - polar_original
     signature, _ = extract_metadata_ring_difference_signature(diff_feature, info["r_values"], metadata)
     angle_period = 180.0 if bool(metadata.get("pi_periodic", True)) else 360.0
-    theta_raw, best_score, _, corr_info = circular_correlation_angle(
+    theta_shift, best_score, _, corr_info = circular_correlation_angle(
         signature,
         metadata["angular_code"],
         angle_period=angle_period,
     )
-    theta_hat = apply_angle_sign(theta_raw, angle_sign)
+    theta_attack_hat = apply_angle_sign(theta_shift, angle_sign, angle_period=angle_period)
+    theta_attack_error = circular_angle_error(theta_attack_hat, expected_theta, period=angle_period)
     return {
-        "diff_theta_hat": float(theta_hat),
-        "diff_angle_error": circular_angle_error(theta_hat, expected_theta, period=360.0),
+        "diff_theta_shift": float(theta_shift),
+        "diff_attack_hat": float(theta_attack_hat),
+        "diff_attack_error": theta_attack_error,
+        "diff_theta_hat": float(theta_attack_hat),
+        "diff_angle_error": theta_attack_error,
         "diff_best_score": float(best_score),
         "diff_corr_margin": float(corr_info.get("corr_margin", float("nan"))),
     }
@@ -334,13 +350,15 @@ def evaluate_one(
         angle_sign,
         expected_theta=float(theta_gt),
     )
-    theta_hat_raw, best_score, score_curve, info = detect_rotbind_angle(
+    angle_period = 180.0 if bool(metadata.get("pi_periodic", True)) else 360.0
+    raw_theta_shift, best_score, score_curve, info = detect_rotbind_angle(
         np.clip(x_att, 0.0, 1.0).astype(np.float32),
         metadata,
         num_r=int(args.num_r),
+        resolve_ambiguity=False,
     )
-    theta_hat = apply_angle_sign(theta_hat_raw, angle_sign)
-    x_corr = rotate_image_keep_size(x_att, -theta_hat)
+    theta_attack_hat = apply_angle_sign(raw_theta_shift, angle_sign, angle_period=angle_period)
+    x_corr = rotate_image_keep_size(x_att, -theta_attack_hat)
     x_corr = np.clip(x_corr, 0.0, 1.0).astype(np.float32)
     x_clean = remove_rotbind_anchor_rgb(x_corr, modulation_grid, alpha)
     x_minus = make_negative_anchor_rgb(x_corr, modulation_grid, alpha)
@@ -352,11 +370,13 @@ def evaluate_one(
         "image_path": str(image_path),
         "alpha": float(alpha),
         "theta_gt": float(theta_gt),
-        "theta_hat_raw": float(theta_hat_raw),
-        "theta_hat": float(theta_hat),
+        "raw_theta_shift": float(raw_theta_shift),
+        "theta_attack_hat": float(theta_attack_hat),
+        "theta_hat_raw": float(raw_theta_shift),
+        "theta_hat": float(theta_attack_hat),
         "angle_sign": angle_sign,
-        "angle_error": circular_angle_error(theta_hat, theta_gt, period=360.0),
-        "angle_error_mod180": circular_angle_error(theta_hat, theta_gt, period=180.0),
+        "angle_error": circular_angle_error(theta_attack_hat, theta_gt, period=angle_period),
+        "angle_error_mod180": circular_angle_error(theta_attack_hat, theta_gt, period=180.0),
         "best_score": float(best_score),
         "top2_score": float(info.get("top2_score", float("nan"))),
         "corr_margin": float(info.get("corr_margin", float("nan"))),
@@ -367,8 +387,11 @@ def evaluate_one(
         "diff_angle_error": diff_info["diff_angle_error"],
         "diff_best_score": diff_info["diff_best_score"],
         "diff_corr_margin": diff_info["diff_corr_margin"],
-        "diff_rot_theta_hat": diff_rot_info["diff_theta_hat"],
-        "diff_rot_angle_error": diff_rot_info["diff_angle_error"],
+        "diff_rot_theta_shift": diff_rot_info["diff_theta_shift"],
+        "diff_rot_attack_hat": diff_rot_info["diff_attack_hat"],
+        "diff_rot_attack_error": diff_rot_info["diff_attack_error"],
+        "diff_rot_theta_hat": diff_rot_info["diff_attack_hat"],
+        "diff_rot_angle_error": diff_rot_info["diff_attack_error"],
         "diff_rot_best_score": diff_rot_info["diff_best_score"],
         "diff_rot_corr_margin": diff_rot_info["diff_corr_margin"],
         "psnr_anchor": psnr(img, x_anchor),
@@ -386,7 +409,7 @@ def evaluate_one(
         "x_minus": x_minus,
         "score_curve": score_curve,
         "theta_gt": theta_gt,
-        "theta_hat": theta_hat,
+        "theta_hat": theta_attack_hat,
         "alpha": alpha,
     }
     return row, artifacts

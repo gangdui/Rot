@@ -103,6 +103,13 @@ def circular_angle_error(theta_hat: float, theta_gt: float, period: float = 360.
     return float(abs(err))
 
 
+def shift_to_attack_angle(theta_shift: float, angle_period: float = 180.0) -> float:
+    """Convert circular-correlation angular shift to image attack angle."""
+    if angle_period <= 0:
+        raise ValueError("angle_period must be positive")
+    return float((-float(theta_shift)) % float(angle_period))
+
+
 def rotate_image_keep_size(img: np.ndarray, angle: float, mode: str = "reflect") -> np.ndarray:
     """Rotate a 2D or RGB image with scipy.ndimage.rotate while preserving shape."""
     arr = _as_float32_array(img, "img")
