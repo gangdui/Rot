@@ -70,6 +70,12 @@ RESULT_FIELDS = [
     "ssim_anchor",
     "psnr_clean",
     "ssim_clean",
+    "vae_mse_anchor",
+    "vae_mse_clean",
+    "vae_mse_symmetric",
+    "vae_cos_anchor",
+    "vae_cos_clean",
+    "vae_cos_symmetric",
     "runtime_ms",
 ]
 SUMMARY_FIELDS = [
@@ -182,6 +188,96 @@ def simple_ssim(x: np.ndarray, y: np.ndarray) -> float:
         den = (mu_a * mu_a + mu_b * mu_b + c1) * (var_a + var_b + c2)
         vals.append(num / den if den != 0 else 1.0)
     return float(np.mean(vals))
+
+
+class DiffusersVaeEncoder:
+    """Small deterministic wrapper around diffusers AutoencoderKL.encode."""
+
+    def __init__(self, model: Any, device: str = "cpu") -> None:
+        self.model = model
+        self.device = device
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: str,
+        device: str = "auto",
+        local_files_only: bool = False,
+        subfolder: str | None = None,
+    ) -> "DiffusersVaeEncoder":
+        """Load a diffusers AutoencoderKL model."""
+        import torch
+        from diffusers import AutoencoderKL
+
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        kwargs: dict[str, Any] = {"local_files_only": local_files_only}
+        if subfolder:
+            kwargs["subfolder"] = subfolder
+        model = AutoencoderKL.from_pretrained(model_name_or_path, **kwargs)
+        model = model.to(device)
+        model.eval()
+        return cls(model, device=device)
+
+    def encode_images(self, images: list[np.ndarray]) -> np.ndarray:
+        """Encode RGB float images in [0, 1] into flattened latent means."""
+        import torch
+
+        batch = np.stack(images, axis=0).astype(np.float32)
+        batch = np.clip(batch, 0.0, 1.0) * 2.0 - 1.0
+        tensor = torch.from_numpy(batch).permute(0, 3, 1, 2).to(self.device)
+        with torch.no_grad():
+            encoded = self.model.encode(tensor)
+            latent = encoded.latent_dist.mean
+        return latent.detach().float().cpu().numpy().reshape(len(images), -1).astype(np.float32)
+
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray, eps: float = 1e-12) -> float:
+    """Return finite cosine similarity between two flattened vectors."""
+    av = np.asarray(a, dtype=np.float64).reshape(-1)
+    bv = np.asarray(b, dtype=np.float64).reshape(-1)
+    denom = float(np.linalg.norm(av) * np.linalg.norm(bv))
+    if denom <= eps:
+        return 0.0
+    return float(np.dot(av, bv) / denom)
+
+
+def compute_vae_footprint_metrics(
+    vae_encoder: Any,
+    x_original: np.ndarray,
+    x_anchor: np.ndarray,
+    x_clean: np.ndarray,
+    x_minus: np.ndarray,
+) -> dict[str, float]:
+    """Compute VAE latent MSE and cosine footprint metrics."""
+    z_original, z_anchor, z_clean, z_minus = vae_encoder.encode_images(
+        [x_original, x_anchor, x_clean, x_minus]
+    )
+    z_symmetric = (z_anchor + z_minus) / 2.0
+
+    def mse(z: np.ndarray) -> float:
+        return float(np.mean((np.asarray(z, dtype=np.float32) - z_original) ** 2))
+
+    return {
+        "vae_mse_anchor": mse(z_anchor),
+        "vae_mse_clean": mse(z_clean),
+        "vae_mse_symmetric": mse(z_symmetric),
+        "vae_cos_anchor": cosine_similarity(z_anchor, z_original),
+        "vae_cos_clean": cosine_similarity(z_clean, z_original),
+        "vae_cos_symmetric": cosine_similarity(z_symmetric, z_original),
+    }
+
+
+def nan_vae_metrics() -> dict[str, float]:
+    """Return NaN placeholders for VAE metrics when disabled."""
+    return {
+        "vae_mse_anchor": float("nan"),
+        "vae_mse_clean": float("nan"),
+        "vae_mse_symmetric": float("nan"),
+        "vae_cos_anchor": float("nan"),
+        "vae_cos_clean": float("nan"),
+        "vae_cos_symmetric": float("nan"),
+    }
 
 
 def normalize_angle(theta: float) -> float:
@@ -344,10 +440,13 @@ def evaluate_one(
     args: argparse.Namespace,
     modulation_grid: np.ndarray,
     metadata: dict[str, Any],
+    vae_encoder: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Evaluate one image/alpha/angle sample and return CSV row plus artifacts."""
     start = time.perf_counter()
     x_anchor = embed_rotbind_anchor_rgb(img, modulation_grid, alpha)
+    x_clean_canonical = remove_rotbind_anchor_rgb(x_anchor, modulation_grid, alpha)
+    x_minus_canonical = make_negative_anchor_rgb(x_anchor, modulation_grid, alpha)
     diff_info = diagnostic_diff_feature(img, x_anchor, metadata, int(args.num_r), angle_sign)
     x_att = rotate_image_keep_size(x_anchor, theta_gt)
     x_rot_original = rotate_image_keep_size(img, theta_gt)
@@ -371,6 +470,11 @@ def evaluate_one(
     x_corr = np.clip(x_corr, 0.0, 1.0).astype(np.float32)
     x_clean = remove_rotbind_anchor_rgb(x_corr, modulation_grid, alpha)
     x_minus = make_negative_anchor_rgb(x_corr, modulation_grid, alpha)
+    vae_metrics = (
+        compute_vae_footprint_metrics(vae_encoder, img, x_anchor, x_clean_canonical, x_minus_canonical)
+        if vae_encoder is not None
+        else nan_vae_metrics()
+    )
     runtime_ms = (time.perf_counter() - start) * 1000.0
 
     ambiguity_resolved, cand0, cand180 = ambiguity_fields(info)
@@ -407,6 +511,7 @@ def evaluate_one(
         "ssim_anchor": simple_ssim(img, x_anchor),
         "psnr_clean": psnr(img, x_clean),
         "ssim_clean": simple_ssim(img, x_clean),
+        **vae_metrics,
         "runtime_ms": runtime_ms,
     }
     artifacts = {
@@ -708,9 +813,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--example-alpha", type=float, default=0.01)
     parser.add_argument("--example-theta", type=float, default=45.0)
     parser.add_argument("--max-images", type=int)
-    parser.add_argument("--angle-sign", choices=["auto", "raw", "neg"], default="auto")
+    parser.add_argument("--angle-sign", choices=["auto", "raw", "neg"], default="raw")
     parser.add_argument("--method", choices=["two_pair", "multi_ringpair"], default="two_pair")
     parser.add_argument("--num-ring-pairs", type=int, default=12)
+    parser.add_argument("--vae-footprint", action="store_true")
+    parser.add_argument("--vae-model", default="stabilityai/sd-vae-ft-mse")
+    parser.add_argument("--vae-subfolder", default=None)
+    parser.add_argument("--vae-device", default="auto")
+    parser.add_argument("--vae-local-files-only", action="store_true")
     args = parser.parse_args(argv)
     if not args.image and not args.image_dir:
         parser.error("one of --image or --image-dir is required")
@@ -730,6 +840,15 @@ def main(argv: list[str] | None = None) -> int:
         selected_angle_sign, _ = calibrate_angle_sign(args)
     else:
         print(f"[Angle sign calibration]\nselected sign = {selected_angle_sign}")
+
+    vae_encoder = None
+    if args.vae_footprint:
+        vae_encoder = DiffusersVaeEncoder.from_pretrained(
+            args.vae_model,
+            device=args.vae_device,
+            local_files_only=bool(args.vae_local_files_only),
+            subfolder=args.vae_subfolder,
+        )
 
     image_paths = discover_images(args)
     rows: list[dict[str, Any]] = []
@@ -759,6 +878,7 @@ def main(argv: list[str] | None = None) -> int:
                     args,
                     modulation_grid,
                     metadata,
+                    vae_encoder=vae_encoder,
                 )
                 rows.append(row)
                 if (

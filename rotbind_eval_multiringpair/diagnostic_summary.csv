@@ -1,4 +1,0 @@
-diagnostic_alpha,num_images,mean_diff_angle_error,median_diff_angle_error,max_diff_angle_error,failure_rate_diff_error_gt_3deg,mean_diff_best_score,mean_diff_corr_margin,selected_angle_sign
-0.05,7,0.2857142857142857,0.0,1.0,0.0,258.32210867745533,0.0,raw
-0.1,7,0.14285714285714285,0.0,1.0,0.0,258.1061706542969,0.0,raw
-0.2,7,0.14285714285714285,0.0,1.0,0.0,257.94396318708147,0.0,raw
