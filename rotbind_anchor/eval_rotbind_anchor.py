@@ -79,6 +79,8 @@ RESULT_FIELDS = [
     "vae_mse_symmetric_canonical",
     "vae_mse_symmetric_predcorr",
     "vae_mse_symmetric_oraclecorr",
+    "vae_mse_roundtrip_oracle",
+    "vae_mse_anchor_removed_extra",
     "vae_cos_anchor",
     "vae_cos_clean",
     "vae_cos_symmetric",
@@ -88,6 +90,7 @@ RESULT_FIELDS = [
     "vae_cos_symmetric_canonical",
     "vae_cos_symmetric_predcorr",
     "vae_cos_symmetric_oraclecorr",
+    "vae_cos_roundtrip_oracle",
     "runtime_ms",
 ]
 SUMMARY_FIELDS = [
@@ -292,6 +295,7 @@ def compute_rotated_corrected_vae_metrics(
     x_minus_canonical: np.ndarray,
     x_minus_predcorr: np.ndarray,
     x_minus_oraclecorr: np.ndarray,
+    x_roundtrip_oracle: np.ndarray,
 ) -> dict[str, float]:
     """Compute VAE metrics for canonical, predicted-corrected, and oracle-corrected variants."""
     (
@@ -305,6 +309,7 @@ def compute_rotated_corrected_vae_metrics(
         z_minus_canonical,
         z_minus_predcorr,
         z_minus_oraclecorr,
+        z_roundtrip_oracle,
     ) = vae_encoder.encode_images(
         [
             x_original,
@@ -317,6 +322,7 @@ def compute_rotated_corrected_vae_metrics(
             x_minus_canonical,
             x_minus_predcorr,
             x_minus_oraclecorr,
+            x_roundtrip_oracle,
         ]
     )
     z_symmetric_canonical = (z_plus_canonical + z_minus_canonical) / 2.0
@@ -334,6 +340,7 @@ def compute_rotated_corrected_vae_metrics(
         "vae_mse_symmetric_canonical": mse(z_symmetric_canonical),
         "vae_mse_symmetric_predcorr": mse(z_symmetric_predcorr),
         "vae_mse_symmetric_oraclecorr": mse(z_symmetric_oraclecorr),
+        "vae_mse_roundtrip_oracle": mse(z_roundtrip_oracle),
         "vae_cos_anchor": cosine_similarity(z_plus_canonical, z_original),
         "vae_cos_clean_canonical": cosine_similarity(z_clean_canonical, z_original),
         "vae_cos_clean_predcorr": cosine_similarity(z_clean_predcorr, z_original),
@@ -341,7 +348,11 @@ def compute_rotated_corrected_vae_metrics(
         "vae_cos_symmetric_canonical": cosine_similarity(z_symmetric_canonical, z_original),
         "vae_cos_symmetric_predcorr": cosine_similarity(z_symmetric_predcorr, z_original),
         "vae_cos_symmetric_oraclecorr": cosine_similarity(z_symmetric_oraclecorr, z_original),
+        "vae_cos_roundtrip_oracle": cosine_similarity(z_roundtrip_oracle, z_original),
     }
+    metrics["vae_mse_anchor_removed_extra"] = (
+        metrics["vae_mse_clean_oraclecorr"] - metrics["vae_mse_roundtrip_oracle"]
+    )
     metrics["vae_mse_clean"] = metrics["vae_mse_clean_canonical"]
     metrics["vae_mse_symmetric"] = metrics["vae_mse_symmetric_canonical"]
     metrics["vae_cos_clean"] = metrics["vae_cos_clean_canonical"]
@@ -361,6 +372,8 @@ def nan_vae_metrics() -> dict[str, float]:
         "vae_mse_symmetric_canonical": float("nan"),
         "vae_mse_symmetric_predcorr": float("nan"),
         "vae_mse_symmetric_oraclecorr": float("nan"),
+        "vae_mse_roundtrip_oracle": float("nan"),
+        "vae_mse_anchor_removed_extra": float("nan"),
         "vae_cos_anchor": float("nan"),
         "vae_cos_clean": float("nan"),
         "vae_cos_symmetric": float("nan"),
@@ -370,6 +383,7 @@ def nan_vae_metrics() -> dict[str, float]:
         "vae_cos_symmetric_canonical": float("nan"),
         "vae_cos_symmetric_predcorr": float("nan"),
         "vae_cos_symmetric_oraclecorr": float("nan"),
+        "vae_cos_roundtrip_oracle": float("nan"),
     }
 
 
@@ -543,6 +557,8 @@ def evaluate_one(
     diff_info = diagnostic_diff_feature(img, x_anchor, metadata, int(args.num_r), angle_sign)
     x_att = rotate_image_keep_size(x_anchor, theta_gt)
     x_rot_original = rotate_image_keep_size(img, theta_gt)
+    x_roundtrip_oracle = rotate_image_keep_size(x_rot_original, -float(theta_gt))
+    x_roundtrip_oracle = np.clip(x_roundtrip_oracle, 0.0, 1.0).astype(np.float32)
     diff_rot_info = diagnostic_diff_feature(
         np.clip(x_rot_original, 0.0, 1.0).astype(np.float32),
         np.clip(x_att, 0.0, 1.0).astype(np.float32),
@@ -580,6 +596,7 @@ def evaluate_one(
             x_minus_canonical,
             x_minus,
             x_minus_oracle,
+            x_roundtrip_oracle,
         )
         if vae_encoder is not None
         else nan_vae_metrics()
