@@ -73,9 +73,21 @@ RESULT_FIELDS = [
     "vae_mse_anchor",
     "vae_mse_clean",
     "vae_mse_symmetric",
+    "vae_mse_clean_canonical",
+    "vae_mse_clean_predcorr",
+    "vae_mse_clean_oraclecorr",
+    "vae_mse_symmetric_canonical",
+    "vae_mse_symmetric_predcorr",
+    "vae_mse_symmetric_oraclecorr",
     "vae_cos_anchor",
     "vae_cos_clean",
     "vae_cos_symmetric",
+    "vae_cos_clean_canonical",
+    "vae_cos_clean_predcorr",
+    "vae_cos_clean_oraclecorr",
+    "vae_cos_symmetric_canonical",
+    "vae_cos_symmetric_predcorr",
+    "vae_cos_symmetric_oraclecorr",
     "runtime_ms",
 ]
 SUMMARY_FIELDS = [
@@ -268,15 +280,96 @@ def compute_vae_footprint_metrics(
     }
 
 
+def compute_rotated_corrected_vae_metrics(
+    vae_encoder: Any,
+    x_original: np.ndarray,
+    x_plus_canonical: np.ndarray,
+    x_plus_predcorr: np.ndarray,
+    x_plus_oraclecorr: np.ndarray,
+    x_clean_canonical: np.ndarray,
+    x_clean_predcorr: np.ndarray,
+    x_clean_oraclecorr: np.ndarray,
+    x_minus_canonical: np.ndarray,
+    x_minus_predcorr: np.ndarray,
+    x_minus_oraclecorr: np.ndarray,
+) -> dict[str, float]:
+    """Compute VAE metrics for canonical, predicted-corrected, and oracle-corrected variants."""
+    (
+        z_original,
+        z_plus_canonical,
+        z_plus_predcorr,
+        z_plus_oraclecorr,
+        z_clean_canonical,
+        z_clean_predcorr,
+        z_clean_oraclecorr,
+        z_minus_canonical,
+        z_minus_predcorr,
+        z_minus_oraclecorr,
+    ) = vae_encoder.encode_images(
+        [
+            x_original,
+            x_plus_canonical,
+            x_plus_predcorr,
+            x_plus_oraclecorr,
+            x_clean_canonical,
+            x_clean_predcorr,
+            x_clean_oraclecorr,
+            x_minus_canonical,
+            x_minus_predcorr,
+            x_minus_oraclecorr,
+        ]
+    )
+    z_symmetric_canonical = (z_plus_canonical + z_minus_canonical) / 2.0
+    z_symmetric_predcorr = (z_plus_predcorr + z_minus_predcorr) / 2.0
+    z_symmetric_oraclecorr = (z_plus_oraclecorr + z_minus_oraclecorr) / 2.0
+
+    def mse(z: np.ndarray) -> float:
+        return float(np.mean((np.asarray(z, dtype=np.float32) - z_original) ** 2))
+
+    metrics = {
+        "vae_mse_anchor": mse(z_plus_canonical),
+        "vae_mse_clean_canonical": mse(z_clean_canonical),
+        "vae_mse_clean_predcorr": mse(z_clean_predcorr),
+        "vae_mse_clean_oraclecorr": mse(z_clean_oraclecorr),
+        "vae_mse_symmetric_canonical": mse(z_symmetric_canonical),
+        "vae_mse_symmetric_predcorr": mse(z_symmetric_predcorr),
+        "vae_mse_symmetric_oraclecorr": mse(z_symmetric_oraclecorr),
+        "vae_cos_anchor": cosine_similarity(z_plus_canonical, z_original),
+        "vae_cos_clean_canonical": cosine_similarity(z_clean_canonical, z_original),
+        "vae_cos_clean_predcorr": cosine_similarity(z_clean_predcorr, z_original),
+        "vae_cos_clean_oraclecorr": cosine_similarity(z_clean_oraclecorr, z_original),
+        "vae_cos_symmetric_canonical": cosine_similarity(z_symmetric_canonical, z_original),
+        "vae_cos_symmetric_predcorr": cosine_similarity(z_symmetric_predcorr, z_original),
+        "vae_cos_symmetric_oraclecorr": cosine_similarity(z_symmetric_oraclecorr, z_original),
+    }
+    metrics["vae_mse_clean"] = metrics["vae_mse_clean_canonical"]
+    metrics["vae_mse_symmetric"] = metrics["vae_mse_symmetric_canonical"]
+    metrics["vae_cos_clean"] = metrics["vae_cos_clean_canonical"]
+    metrics["vae_cos_symmetric"] = metrics["vae_cos_symmetric_canonical"]
+    return metrics
+
+
 def nan_vae_metrics() -> dict[str, float]:
     """Return NaN placeholders for VAE metrics when disabled."""
     return {
         "vae_mse_anchor": float("nan"),
         "vae_mse_clean": float("nan"),
         "vae_mse_symmetric": float("nan"),
+        "vae_mse_clean_canonical": float("nan"),
+        "vae_mse_clean_predcorr": float("nan"),
+        "vae_mse_clean_oraclecorr": float("nan"),
+        "vae_mse_symmetric_canonical": float("nan"),
+        "vae_mse_symmetric_predcorr": float("nan"),
+        "vae_mse_symmetric_oraclecorr": float("nan"),
         "vae_cos_anchor": float("nan"),
         "vae_cos_clean": float("nan"),
         "vae_cos_symmetric": float("nan"),
+        "vae_cos_clean_canonical": float("nan"),
+        "vae_cos_clean_predcorr": float("nan"),
+        "vae_cos_clean_oraclecorr": float("nan"),
+        "vae_cos_symmetric_canonical": float("nan"),
+        "vae_cos_symmetric_predcorr": float("nan"),
+        "vae_cos_symmetric_oraclecorr": float("nan"),
     }
 
 
@@ -470,8 +563,24 @@ def evaluate_one(
     x_corr = np.clip(x_corr, 0.0, 1.0).astype(np.float32)
     x_clean = remove_rotbind_anchor_rgb(x_corr, modulation_grid, alpha)
     x_minus = make_negative_anchor_rgb(x_corr, modulation_grid, alpha)
+    x_oracle_corr = rotate_image_keep_size(x_att, -float(theta_gt))
+    x_oracle_corr = np.clip(x_oracle_corr, 0.0, 1.0).astype(np.float32)
+    x_clean_oracle = remove_rotbind_anchor_rgb(x_oracle_corr, modulation_grid, alpha)
+    x_minus_oracle = make_negative_anchor_rgb(x_oracle_corr, modulation_grid, alpha)
     vae_metrics = (
-        compute_vae_footprint_metrics(vae_encoder, img, x_anchor, x_clean_canonical, x_minus_canonical)
+        compute_rotated_corrected_vae_metrics(
+            vae_encoder,
+            img,
+            x_anchor,
+            x_corr,
+            x_oracle_corr,
+            x_clean_canonical,
+            x_clean,
+            x_clean_oracle,
+            x_minus_canonical,
+            x_minus,
+            x_minus_oracle,
+        )
         if vae_encoder is not None
         else nan_vae_metrics()
     )
