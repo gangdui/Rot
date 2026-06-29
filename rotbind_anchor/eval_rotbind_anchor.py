@@ -73,6 +73,7 @@ RESULT_FIELDS = [
     "runtime_ms",
 ]
 SUMMARY_FIELDS = [
+    "method",
     "alpha",
     "num_samples",
     "mean_angle_error",
@@ -83,9 +84,17 @@ SUMMARY_FIELDS = [
     "mean_angle_error_mod180",
     "failure_rate_mod180_error_gt_3deg",
     "mean_psnr_anchor",
+    "mean_psnr_anchor_finite",
+    "median_psnr_anchor",
+    "num_inf_psnr_anchor",
     "mean_ssim_anchor",
+    "median_ssim_anchor",
     "mean_psnr_clean",
+    "mean_psnr_clean_finite",
+    "median_psnr_clean",
+    "num_inf_psnr_clean",
     "mean_ssim_clean",
+    "median_ssim_clean",
     "mean_runtime_ms",
     "selected_angle_sign",
 ]
@@ -424,7 +433,16 @@ def write_csv(path: Path, fields: list[str], rows: list[dict[str, Any]]) -> None
             writer.writerow({field: row.get(field, float("nan")) for field in fields})
 
 
-def summarize(rows: list[dict[str, Any]], selected_angle_sign: str) -> list[dict[str, Any]]:
+def finite_stats(values: np.ndarray) -> tuple[float, float, int]:
+    """Return finite mean, finite median, and number of infinite values."""
+    finite = values[np.isfinite(values)]
+    num_inf = int(np.isinf(values).sum())
+    if finite.size == 0:
+        return float("nan"), float("nan"), num_inf
+    return float(np.nanmean(finite)), float(np.nanmedian(finite)), num_inf
+
+
+def summarize(rows: list[dict[str, Any]], selected_angle_sign: str, method: str = "unknown") -> list[dict[str, Any]]:
     """Aggregate result rows by alpha."""
     summary = []
     alphas = sorted({float(row["alpha"]) for row in rows})
@@ -436,8 +454,15 @@ def summarize(rows: list[dict[str, Any]], selected_angle_sign: str) -> list[dict
 
         ae = arr("angle_error")
         ae180 = arr("angle_error_mod180")
+        psnr_anchor = arr("psnr_anchor")
+        psnr_clean = arr("psnr_clean")
+        psnr_anchor_finite_mean, psnr_anchor_median, psnr_anchor_num_inf = finite_stats(psnr_anchor)
+        psnr_clean_finite_mean, psnr_clean_median, psnr_clean_num_inf = finite_stats(psnr_clean)
+        ssim_anchor = arr("ssim_anchor")
+        ssim_clean = arr("ssim_clean")
         summary.append(
             {
+                "method": method,
                 "alpha": alpha,
                 "num_samples": len(group),
                 "mean_angle_error": float(np.nanmean(ae)),
@@ -447,10 +472,18 @@ def summarize(rows: list[dict[str, Any]], selected_angle_sign: str) -> list[dict
                 "failure_rate_error_gt_3deg": float(np.nanmean(ae > 3.0)),
                 "mean_angle_error_mod180": float(np.nanmean(ae180)),
                 "failure_rate_mod180_error_gt_3deg": float(np.nanmean(ae180 > 3.0)),
-                "mean_psnr_anchor": float(np.nanmean(arr("psnr_anchor"))),
-                "mean_ssim_anchor": float(np.nanmean(arr("ssim_anchor"))),
-                "mean_psnr_clean": float(np.nanmean(arr("psnr_clean"))),
-                "mean_ssim_clean": float(np.nanmean(arr("ssim_clean"))),
+                "mean_psnr_anchor": float(np.nanmean(psnr_anchor)),
+                "mean_psnr_anchor_finite": psnr_anchor_finite_mean,
+                "median_psnr_anchor": psnr_anchor_median,
+                "num_inf_psnr_anchor": psnr_anchor_num_inf,
+                "mean_ssim_anchor": float(np.nanmean(ssim_anchor)),
+                "median_ssim_anchor": float(np.nanmedian(ssim_anchor)),
+                "mean_psnr_clean": float(np.nanmean(psnr_clean)),
+                "mean_psnr_clean_finite": psnr_clean_finite_mean,
+                "median_psnr_clean": psnr_clean_median,
+                "num_inf_psnr_clean": psnr_clean_num_inf,
+                "mean_ssim_clean": float(np.nanmean(ssim_clean)),
+                "median_ssim_clean": float(np.nanmedian(ssim_clean)),
                 "mean_runtime_ms": float(np.nanmean(arr("runtime_ms"))),
                 "selected_angle_sign": selected_angle_sign,
             }
@@ -739,7 +772,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not rows:
         raise RuntimeError("no evaluation rows produced")
-    summary = summarize(rows, selected_angle_sign)
+    summary = summarize(rows, selected_angle_sign, method=args.method)
     diagnostic_rows = evaluate_diagnostic_alphas(image_paths, args, selected_angle_sign)
     diagnostic_summary = summarize_diagnostics(diagnostic_rows, selected_angle_sign)
     write_csv(outdir / "rotbind_results.csv", RESULT_FIELDS, rows)
