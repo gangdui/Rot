@@ -22,12 +22,11 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rotbind_anchor.rotbind_anchor import (  # noqa: E402
-    band_indices_for_polar_grid,
     circular_angle_error,
     circular_correlation_angle,
     detect_rotbind_angle,
     embed_rotbind_anchor_rgb,
-    extract_ring_difference_signature,
+    extract_metadata_ring_difference_signature,
     fft_polar_log_magnitude,
     make_negative_anchor_rgb,
     make_ring_pair_mask,
@@ -57,6 +56,10 @@ RESULT_FIELDS = [
     "diff_angle_error",
     "diff_best_score",
     "diff_corr_margin",
+    "diff_rot_theta_hat",
+    "diff_rot_angle_error",
+    "diff_rot_best_score",
+    "diff_rot_corr_margin",
     "psnr_anchor",
     "ssim_anchor",
     "psnr_clean",
@@ -229,6 +232,8 @@ def calibrate_angle_sign(args: argparse.Namespace) -> tuple[str, dict[str, float
             W,
             num_angles=int(args.num_angles),
             key=int(args.key),
+            method=args.method,
+            num_ring_pairs=int(args.num_ring_pairs),
         )
         x_anchor = embed_rotbind_anchor_rgb(img, modulation_grid, alpha)
         for theta_gt in angles:
@@ -263,6 +268,7 @@ def diagnostic_diff_feature(
     metadata: dict[str, Any],
     num_r: int,
     angle_sign: str,
+    expected_theta: float = 0.0,
 ) -> dict[str, float]:
     """Correlate PolarFeature(x_anchor)-PolarFeature(x) against the angular code."""
     pos_bands = metadata["pos_bands"]
@@ -287,9 +293,7 @@ def diagnostic_diff_feature(
         normalize="per_radius",
     )
     diff_feature = polar_anchor - polar_original
-    pos_idx = band_indices_for_polar_grid(info["r_values"], pos_bands)
-    neg_idx = band_indices_for_polar_grid(info["r_values"], neg_bands)
-    signature = extract_ring_difference_signature(diff_feature, pos_idx, neg_idx)
+    signature, _ = extract_metadata_ring_difference_signature(diff_feature, info["r_values"], metadata)
     angle_period = 180.0 if bool(metadata.get("pi_periodic", True)) else 360.0
     theta_raw, best_score, _, corr_info = circular_correlation_angle(
         signature,
@@ -299,7 +303,7 @@ def diagnostic_diff_feature(
     theta_hat = apply_angle_sign(theta_raw, angle_sign)
     return {
         "diff_theta_hat": float(theta_hat),
-        "diff_angle_error": circular_angle_error(theta_hat, 0.0, period=360.0),
+        "diff_angle_error": circular_angle_error(theta_hat, expected_theta, period=360.0),
         "diff_best_score": float(best_score),
         "diff_corr_margin": float(corr_info.get("corr_margin", float("nan"))),
     }
@@ -321,6 +325,15 @@ def evaluate_one(
     x_anchor = embed_rotbind_anchor_rgb(img, modulation_grid, alpha)
     diff_info = diagnostic_diff_feature(img, x_anchor, metadata, int(args.num_r), angle_sign)
     x_att = rotate_image_keep_size(x_anchor, theta_gt)
+    x_rot_original = rotate_image_keep_size(img, theta_gt)
+    diff_rot_info = diagnostic_diff_feature(
+        np.clip(x_rot_original, 0.0, 1.0).astype(np.float32),
+        np.clip(x_att, 0.0, 1.0).astype(np.float32),
+        metadata,
+        int(args.num_r),
+        angle_sign,
+        expected_theta=float(theta_gt),
+    )
     theta_hat_raw, best_score, score_curve, info = detect_rotbind_angle(
         np.clip(x_att, 0.0, 1.0).astype(np.float32),
         metadata,
@@ -354,6 +367,10 @@ def evaluate_one(
         "diff_angle_error": diff_info["diff_angle_error"],
         "diff_best_score": diff_info["diff_best_score"],
         "diff_corr_margin": diff_info["diff_corr_margin"],
+        "diff_rot_theta_hat": diff_rot_info["diff_theta_hat"],
+        "diff_rot_angle_error": diff_rot_info["diff_angle_error"],
+        "diff_rot_best_score": diff_rot_info["diff_best_score"],
+        "diff_rot_corr_margin": diff_rot_info["diff_corr_margin"],
         "psnr_anchor": psnr(img, x_anchor),
         "ssim_anchor": simple_ssim(img, x_anchor),
         "psnr_clean": psnr(img, x_clean),
@@ -433,6 +450,8 @@ def evaluate_diagnostic_alphas(
             W,
             num_angles=int(args.num_angles),
             key=int(args.key),
+            method=args.method,
+            num_ring_pairs=int(args.num_ring_pairs),
         )
         for alpha in args.diagnostic_alphas:
             x_anchor = embed_rotbind_anchor_rgb(img, modulation_grid, float(alpha))
@@ -620,7 +639,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--size", type=int, default=512)
     parser.add_argument("--no-resize", action="store_true")
-    parser.add_argument("--alphas", type=parse_float_list, default=parse_float_list("0.005,0.01,0.02,0.03"))
+    parser.add_argument("--alphas", type=parse_float_list, default=parse_float_list("0.005,0.01,0.02,0.03,0.05,0.1,0.2"))
     parser.add_argument("--diagnostic-alphas", type=parse_float_list, default=parse_float_list("0.05,0.1,0.2"))
     parser.add_argument(
         "--angles",
@@ -634,6 +653,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--example-theta", type=float, default=45.0)
     parser.add_argument("--max-images", type=int)
     parser.add_argument("--angle-sign", choices=["auto", "raw", "neg"], default="auto")
+    parser.add_argument("--method", choices=["two_pair", "multi_ringpair"], default="two_pair")
+    parser.add_argument("--num-ring-pairs", type=int, default=12)
     args = parser.parse_args(argv)
     if not args.image and not args.image_dir:
         parser.error("one of --image or --image-dir is required")
@@ -666,6 +687,8 @@ def main(argv: list[str] | None = None) -> int:
             W,
             num_angles=int(args.num_angles),
             key=int(args.key),
+            method=args.method,
+            num_ring_pairs=int(args.num_ring_pairs),
         )
         image_id = image_path.stem if image_path.stem else f"image_{image_index:04d}"
         for alpha in args.alphas:

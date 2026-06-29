@@ -188,15 +188,42 @@ def make_ring_pair_mask(
     mode: str = "rademacher",
     pi_periodic: bool = True,
     transition: float = 0.01,
+    method: str = "two_pair",
+    num_ring_pairs: int = 12,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Construct an unshifted FFT-grid differential ring-pair modulation mask."""
     H = int(H)
     W = int(W)
     if H <= 0 or W <= 0:
         raise ValueError("H and W must be positive")
-    pos_bands = _validate_bands(pos_bands or DEFAULT_POS_BANDS, "pos_bands")
-    neg_bands = _validate_bands(neg_bands or DEFAULT_NEG_BANDS, "neg_bands")
+    if method not in {"two_pair", "multi_ringpair"}:
+        raise ValueError("method must be 'two_pair' or 'multi_ringpair'")
     angular_code = make_angular_code(num_angles, key=key, mode=mode, pi_periodic=pi_periodic)
+
+    ring_pairs: list[dict[str, Any]] = []
+    if method == "two_pair":
+        pos_bands = _validate_bands(pos_bands or DEFAULT_POS_BANDS, "pos_bands")
+        neg_bands = _validate_bands(neg_bands or DEFAULT_NEG_BANDS, "neg_bands")
+        for pos_band, neg_band in zip(pos_bands, neg_bands):
+            ring_pairs.append({"pos_band": pos_band, "neg_band": neg_band, "sign": 1})
+    else:
+        num_ring_pairs = int(num_ring_pairs)
+        if not 8 <= num_ring_pairs <= 16:
+            raise ValueError("num_ring_pairs must be in [8, 16] for method='multi_ringpair'")
+        pair_rng = np.random.default_rng(int(key) + 7919)
+        pair_signs = pair_rng.choice(np.array([-1, 1], dtype=np.int32), size=num_ring_pairs)
+        r0, r1 = 0.12, 0.36
+        span = (r1 - r0) / num_ring_pairs
+        pos_bands = []
+        neg_bands = []
+        for idx in range(num_ring_pairs):
+            start = r0 + idx * span
+            pos_band = (start + 0.12 * span, start + 0.38 * span)
+            neg_band = (start + 0.62 * span, start + 0.88 * span)
+            sign = int(pair_signs[idx])
+            pos_bands.append(pos_band)
+            neg_bands.append(neg_band)
+            ring_pairs.append({"pos_band": pos_band, "neg_band": neg_band, "sign": sign})
 
     fy = np.fft.fftfreq(H).astype(np.float32)
     fx = np.fft.fftfreq(W).astype(np.float32)
@@ -207,14 +234,15 @@ def make_ring_pair_mask(
     angle_idx = np.clip(angle_idx, 0, num_angles - 1)
     code_grid = angular_code[angle_idx]
 
-    pos_window = np.zeros((H, W), dtype=np.float32)
-    neg_window = np.zeros((H, W), dtype=np.float32)
-    for r0, r1 in pos_bands:
-        pos_window += soft_bandpass_radius(radius, r0, r1, transition=transition)
-    for r0, r1 in neg_bands:
-        neg_window += soft_bandpass_radius(radius, r0, r1, transition=transition)
+    pair_window = np.zeros((H, W), dtype=np.float32)
+    for pair in ring_pairs:
+        pos0, pos1 = pair["pos_band"]
+        neg0, neg1 = pair["neg_band"]
+        pos_window = soft_bandpass_radius(radius, pos0, pos1, transition=transition)
+        neg_window = soft_bandpass_radius(radius, neg0, neg1, transition=transition)
+        pair_window += float(pair["sign"]) * (pos_window - neg_window)
 
-    modulation_grid = (pos_window - neg_window) * code_grid
+    modulation_grid = pair_window * code_grid
 
     if pi_periodic:
         y_neg = (-np.arange(H)) % H
@@ -235,6 +263,9 @@ def make_ring_pair_mask(
         "mode": mode,
         "pi_periodic": bool(pi_periodic),
         "transition": float(transition),
+        "method": method,
+        "num_ring_pairs": int(len(ring_pairs)),
+        "ring_pairs": ring_pairs,
         "angular_code": angular_code.astype(np.float32),
     }
     return modulation_grid.astype(np.float32), metadata
@@ -356,6 +387,38 @@ def extract_ring_difference_signature(
     return normalize_zero_mean_unit_std(pos - neg)
 
 
+def extract_metadata_ring_difference_signature(
+    polar_feature: np.ndarray,
+    r_values: np.ndarray,
+    metadata: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Extract a metadata-aware signed ring-difference signature."""
+    method = metadata.get("method", "two_pair")
+    if method == "multi_ringpair":
+        polar = _as_float32_array(polar_feature, "polar_feature")
+        if polar.ndim != 2:
+            raise ValueError("polar_feature must have shape [num_r, num_angles]")
+        signed_sum = np.zeros(polar.shape[1], dtype=np.float32)
+        pair_infos = []
+        for pair in metadata.get("ring_pairs", []):
+            pos_idx = band_indices_for_polar_grid(r_values, [tuple(pair["pos_band"])])
+            neg_idx = band_indices_for_polar_grid(r_values, [tuple(pair["neg_band"])])
+            pos = polar[np.asarray(pos_idx, dtype=np.int64), :].mean(axis=0)
+            neg = polar[np.asarray(neg_idx, dtype=np.int64), :].mean(axis=0)
+            signed_sum += float(pair["sign"]) * (pos - neg)
+            pair_infos.append({"pos_r_indices": pos_idx, "neg_r_indices": neg_idx, "sign": int(pair["sign"])})
+        if not pair_infos:
+            raise ValueError("metadata['ring_pairs'] must be non-empty for method='multi_ringpair'")
+        return normalize_zero_mean_unit_std(signed_sum), {"ring_pair_indices": pair_infos}
+
+    pos_bands = _validate_bands(metadata["pos_bands"], "pos_bands")
+    neg_bands = _validate_bands(metadata["neg_bands"], "neg_bands")
+    pos_idx = band_indices_for_polar_grid(r_values, pos_bands)
+    neg_idx = band_indices_for_polar_grid(r_values, neg_bands)
+    signature = extract_ring_difference_signature(polar_feature, pos_idx, neg_idx)
+    return signature, {"pos_r_indices": pos_idx, "neg_r_indices": neg_idx}
+
+
 def circular_correlation_angle(
     signature: np.ndarray,
     angular_code: np.ndarray,
@@ -414,10 +477,8 @@ def _polar_signature_from_metadata(
         num_angles=int(metadata["num_angles"]),
         normalize="per_radius",
     )
-    pos_idx = band_indices_for_polar_grid(info["r_values"], pos_bands)
-    neg_idx = band_indices_for_polar_grid(info["r_values"], neg_bands)
-    signature = extract_ring_difference_signature(polar, pos_idx, neg_idx)
-    info.update({"pos_r_indices": pos_idx, "neg_r_indices": neg_idx})
+    signature, sig_info = extract_metadata_ring_difference_signature(polar, info["r_values"], metadata)
+    info.update(sig_info)
     return signature, info
 
 
