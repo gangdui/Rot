@@ -22,9 +22,13 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rotbind_anchor.rotbind_anchor import (  # noqa: E402
+    band_indices_for_polar_grid,
     circular_angle_error,
+    circular_correlation_angle,
     detect_rotbind_angle,
     embed_rotbind_anchor_rgb,
+    extract_ring_difference_signature,
+    fft_polar_log_magnitude,
     make_negative_anchor_rgb,
     make_ring_pair_mask,
     remove_rotbind_anchor_rgb,
@@ -49,6 +53,10 @@ RESULT_FIELDS = [
     "ambiguity_resolved",
     "candidate_score_0",
     "candidate_score_180",
+    "diff_theta_hat",
+    "diff_angle_error",
+    "diff_best_score",
+    "diff_corr_margin",
     "psnr_anchor",
     "ssim_anchor",
     "psnr_clean",
@@ -70,6 +78,17 @@ SUMMARY_FIELDS = [
     "mean_psnr_clean",
     "mean_ssim_clean",
     "mean_runtime_ms",
+    "selected_angle_sign",
+]
+DIAGNOSTIC_SUMMARY_FIELDS = [
+    "diagnostic_alpha",
+    "num_images",
+    "mean_diff_angle_error",
+    "median_diff_angle_error",
+    "max_diff_angle_error",
+    "failure_rate_diff_error_gt_3deg",
+    "mean_diff_best_score",
+    "mean_diff_corr_margin",
     "selected_angle_sign",
 ]
 
@@ -238,6 +257,54 @@ def ambiguity_fields(info: dict[str, Any]) -> tuple[bool, float, float]:
     return True, float(amb.get("score1", float("nan"))), float(amb.get("score2", float("nan")))
 
 
+def diagnostic_diff_feature(
+    img: np.ndarray,
+    x_anchor: np.ndarray,
+    metadata: dict[str, Any],
+    num_r: int,
+    angle_sign: str,
+) -> dict[str, float]:
+    """Correlate PolarFeature(x_anchor)-PolarFeature(x) against the angular code."""
+    pos_bands = metadata["pos_bands"]
+    neg_bands = metadata["neg_bands"]
+    all_bands = pos_bands + neg_bands
+    rmin = min(float(b[0]) for b in all_bands)
+    rmax = max(float(b[1]) for b in all_bands)
+    polar_anchor, info = fft_polar_log_magnitude(
+        x_anchor,
+        rmin,
+        rmax,
+        num_r=int(num_r),
+        num_angles=int(metadata["num_angles"]),
+        normalize="per_radius",
+    )
+    polar_original, _ = fft_polar_log_magnitude(
+        img,
+        rmin,
+        rmax,
+        num_r=int(num_r),
+        num_angles=int(metadata["num_angles"]),
+        normalize="per_radius",
+    )
+    diff_feature = polar_anchor - polar_original
+    pos_idx = band_indices_for_polar_grid(info["r_values"], pos_bands)
+    neg_idx = band_indices_for_polar_grid(info["r_values"], neg_bands)
+    signature = extract_ring_difference_signature(diff_feature, pos_idx, neg_idx)
+    angle_period = 180.0 if bool(metadata.get("pi_periodic", True)) else 360.0
+    theta_raw, best_score, _, corr_info = circular_correlation_angle(
+        signature,
+        metadata["angular_code"],
+        angle_period=angle_period,
+    )
+    theta_hat = apply_angle_sign(theta_raw, angle_sign)
+    return {
+        "diff_theta_hat": float(theta_hat),
+        "diff_angle_error": circular_angle_error(theta_hat, 0.0, period=360.0),
+        "diff_best_score": float(best_score),
+        "diff_corr_margin": float(corr_info.get("corr_margin", float("nan"))),
+    }
+
+
 def evaluate_one(
     img: np.ndarray,
     image_id: str,
@@ -252,6 +319,7 @@ def evaluate_one(
     """Evaluate one image/alpha/angle sample and return CSV row plus artifacts."""
     start = time.perf_counter()
     x_anchor = embed_rotbind_anchor_rgb(img, modulation_grid, alpha)
+    diff_info = diagnostic_diff_feature(img, x_anchor, metadata, int(args.num_r), angle_sign)
     x_att = rotate_image_keep_size(x_anchor, theta_gt)
     theta_hat_raw, best_score, score_curve, info = detect_rotbind_angle(
         np.clip(x_att, 0.0, 1.0).astype(np.float32),
@@ -282,6 +350,10 @@ def evaluate_one(
         "ambiguity_resolved": ambiguity_resolved,
         "candidate_score_0": cand0,
         "candidate_score_180": cand180,
+        "diff_theta_hat": diff_info["diff_theta_hat"],
+        "diff_angle_error": diff_info["diff_angle_error"],
+        "diff_best_score": diff_info["diff_best_score"],
+        "diff_corr_margin": diff_info["diff_corr_margin"],
         "psnr_anchor": psnr(img, x_anchor),
         "ssim_anchor": simple_ssim(img, x_anchor),
         "psnr_clean": psnr(img, x_clean),
@@ -340,6 +412,65 @@ def summarize(rows: list[dict[str, Any]], selected_angle_sign: str) -> list[dict
                 "mean_psnr_clean": float(np.nanmean(arr("psnr_clean"))),
                 "mean_ssim_clean": float(np.nanmean(arr("ssim_clean"))),
                 "mean_runtime_ms": float(np.nanmean(arr("runtime_ms"))),
+                "selected_angle_sign": selected_angle_sign,
+            }
+        )
+    return summary
+
+
+def evaluate_diagnostic_alphas(
+    image_paths: list[Path],
+    args: argparse.Namespace,
+    selected_angle_sign: str,
+) -> list[dict[str, Any]]:
+    """Evaluate diff-feature diagnostics for the requested large alpha values."""
+    rows: list[dict[str, Any]] = []
+    for image_path in image_paths:
+        img = load_rgb_image(image_path, size=int(args.size), no_resize=bool(args.no_resize))
+        H, W = img.shape[:2]
+        modulation_grid, metadata = make_ring_pair_mask(
+            H,
+            W,
+            num_angles=int(args.num_angles),
+            key=int(args.key),
+        )
+        for alpha in args.diagnostic_alphas:
+            x_anchor = embed_rotbind_anchor_rgb(img, modulation_grid, float(alpha))
+            diff_info = diagnostic_diff_feature(
+                img,
+                x_anchor,
+                metadata,
+                int(args.num_r),
+                selected_angle_sign,
+            )
+            rows.append(
+                {
+                    "diagnostic_alpha": float(alpha),
+                    "image_path": str(image_path),
+                    **diff_info,
+                }
+            )
+    return rows
+
+
+def summarize_diagnostics(rows: list[dict[str, Any]], selected_angle_sign: str) -> list[dict[str, Any]]:
+    """Aggregate diff-feature diagnostic rows by diagnostic alpha."""
+    summary: list[dict[str, Any]] = []
+    for alpha in sorted({float(row["diagnostic_alpha"]) for row in rows}):
+        group = [row for row in rows if float(row["diagnostic_alpha"]) == alpha]
+        errors = np.asarray([float(row["diff_angle_error"]) for row in group], dtype=np.float64)
+        scores = np.asarray([float(row["diff_best_score"]) for row in group], dtype=np.float64)
+        margins = np.asarray([float(row["diff_corr_margin"]) for row in group], dtype=np.float64)
+        summary.append(
+            {
+                "diagnostic_alpha": alpha,
+                "num_images": len(group),
+                "mean_diff_angle_error": float(np.nanmean(errors)),
+                "median_diff_angle_error": float(np.nanmedian(errors)),
+                "max_diff_angle_error": float(np.nanmax(errors)),
+                "failure_rate_diff_error_gt_3deg": float(np.nanmean(errors > 3.0)),
+                "mean_diff_best_score": float(np.nanmean(scores)),
+                "mean_diff_corr_margin": float(np.nanmean(margins)),
                 "selected_angle_sign": selected_angle_sign,
             }
         )
@@ -490,6 +621,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--size", type=int, default=512)
     parser.add_argument("--no-resize", action="store_true")
     parser.add_argument("--alphas", type=parse_float_list, default=parse_float_list("0.005,0.01,0.02,0.03"))
+    parser.add_argument("--diagnostic-alphas", type=parse_float_list, default=parse_float_list("0.05,0.1,0.2"))
     parser.add_argument(
         "--angles",
         type=parse_float_list,
@@ -562,8 +694,11 @@ def main(argv: list[str] | None = None) -> int:
     if not rows:
         raise RuntimeError("no evaluation rows produced")
     summary = summarize(rows, selected_angle_sign)
+    diagnostic_rows = evaluate_diagnostic_alphas(image_paths, args, selected_angle_sign)
+    diagnostic_summary = summarize_diagnostics(diagnostic_rows, selected_angle_sign)
     write_csv(outdir / "rotbind_results.csv", RESULT_FIELDS, rows)
     write_csv(outdir / "summary.csv", SUMMARY_FIELDS, summary)
+    write_csv(outdir / "diagnostic_summary.csv", DIAGNOSTIC_SUMMARY_FIELDS, diagnostic_summary)
     save_plots(outdir, rows, summary, example_artifacts or {})
 
     overall_mean = float(np.nanmean([float(row["angle_error"]) for row in rows]))
@@ -580,6 +715,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"mean SSIM anchor / clean = {mean_ssim_anchor:.6f} / {mean_ssim_clean:.6f}")
     print(f"results = {outdir / 'rotbind_results.csv'}")
     print(f"summary = {outdir / 'summary.csv'}")
+    print(f"diagnostic_summary = {outdir / 'diagnostic_summary.csv'}")
     return 0
 
 

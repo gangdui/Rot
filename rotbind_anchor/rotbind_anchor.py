@@ -379,9 +379,11 @@ def circular_correlation_angle(
         top2_score = float(np.min(top))
     else:
         top2_score = float("-inf")
-    theta_mod = float(best_idx / corr.size * float(angle_period))
+    theta_full = float(best_idx / corr.size * 360.0)
+    theta_mod = float(theta_full % float(angle_period))
     extra_info: dict[str, Any] = {
         "angle_bin": best_idx,
+        "theta_full": theta_full,
         "top2_score": top2_score,
         "corr_margin": float(best_score - top2_score),
         "raw_shift": best_idx,
