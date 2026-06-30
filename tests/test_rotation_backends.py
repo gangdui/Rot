@@ -1,4 +1,4 @@
-"""Tests for Tree-Ring-like rotation attack configuration."""
+"""Tests for benchmark-aligned same-size zero-fill rotation attack configuration."""
 
 import numpy as np
 
@@ -19,7 +19,7 @@ def test_torchvision_rotation_preserves_rgb_shape_dtype_and_range() -> None:
     assert float(rotated.max()) <= 1.0
 
 
-def test_eval_parser_defaults_to_treering_like_attack_and_bilinear_correction() -> None:
+def test_eval_parser_defaults_to_same_size_zfill_attack_and_bilinear_correction() -> None:
     from rotbind_anchor.eval_rotbind_anchor import parse_args
 
     args = parse_args(["--image", "dummy.png", "--outdir", "out"])

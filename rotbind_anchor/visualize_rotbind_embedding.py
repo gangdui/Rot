@@ -83,7 +83,7 @@ def fft_log_mag_y(y: np.ndarray) -> np.ndarray:
 
 
 def rotate_with_config(img: np.ndarray, angle: float, backend: str, interpolation: str, fill: float) -> np.ndarray:
-    """Rotate with either Tree-Ring-like torchvision settings or scipy diagnostics."""
+    """Rotate with either benchmark-style torchvision settings or scipy diagnostics."""
     if backend == "torchvision":
         return rotate_image_torchvision_keep_size(img, angle, interpolation=interpolation, fill=fill)
     if backend == "scipy":

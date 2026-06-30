@@ -68,17 +68,21 @@ together with the scaled MSE values.
 
 ## Rotation Attack Benchmark
 
-Main robustness benchmarks use Tree-Ring-like rotation distortion:
+Main robustness benchmarks use a literature-aligned same-size zero-fill
+rotation attack:
 
 - torchvision rotation
-- nearest interpolation for the attack
+- attack interpolation = nearest
 - `expand=False`
-- `fill=0`
+- attack fill = 0
+- correction interpolation = bilinear
+- correction fill = 0
 
-The default correction rotation uses torchvision bilinear interpolation with
-`fill=0`. Internal diagnostics may additionally report scipy bilinear reflect
-rotation (`reshape=False`, `order=1`, `mode="reflect"`), but that is not the
-main comparison setting.
+This follows the common same-size zero-fill rotation setup used in prior
+watermark robustness evaluations. It is not specific to Tree-Ring. Internal
+diagnostics may additionally report scipy bilinear reflect rotation
+(`reshape=False`, `order=1`, `mode="reflect"`), but that is not the main
+comparison setting.
 
 ## PSNR/SSIM Quality Metrics
 

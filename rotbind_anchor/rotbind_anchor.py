@@ -156,10 +156,11 @@ def rotate_image_torchvision_keep_size(
     interpolation: str = "nearest",
     fill: float = 0.0,
 ) -> np.ndarray:
-    """Rotate an RGB float image with torchvision, matching Tree-Ring-like rotation.
+    """Rotate an RGB float image with benchmark-style same-size zero-fill rotation.
 
-    This matches Tree-Ring public-code style rotation when interpolation is
-    "nearest", expand=False, center=None, and fill=0.
+    With interpolation="nearest", expand=False, center=None, and fill=0, this
+    matches the standard rotation attack configuration used for main
+    robustness benchmarks.
     """
     arr = _check_rgb_image(img, "img")
     if interpolation not in {"nearest", "bilinear"}:
@@ -754,8 +755,8 @@ def make_negative_anchor_rgb(
     return np.clip(ycbcr_to_rgb(ycbcr_minus), 0.0, 1.0).astype(np.float32)
 
 
-def _smoke_test() -> None:
-    """Run a tiny end-to-end smoke test without evaluating accuracy."""
+def _self_test() -> None:
+    """Run a tiny end-to-end self-test without evaluating accuracy."""
     yy, xx = np.mgrid[0:64, 0:64].astype(np.float32)
     x = xx / 63.0
     y = yy / 63.0
@@ -772,4 +773,4 @@ def _smoke_test() -> None:
 
 
 if __name__ == "__main__":
-    _smoke_test()
+    _self_test()
