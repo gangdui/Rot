@@ -56,6 +56,12 @@ RESULT_FIELDS = [
     "ambiguity_resolved",
     "candidate_score_0",
     "candidate_score_180",
+    "diff_corr_shift_deg",
+    "diff_rotation_hat_deg",
+    "diff_rotation_error_deg",
+    "diff_rot_corr_shift_deg",
+    "diff_rot_rotation_hat_deg",
+    "diff_rot_rotation_error_deg",
     # Legacy angle fields kept temporarily for old analysis scripts.
     "theta_gt",
     "raw_theta_shift",
@@ -129,10 +135,10 @@ SUMMARY_FIELDS = [
 DIAGNOSTIC_SUMMARY_FIELDS = [
     "diagnostic_alpha",
     "num_images",
-    "mean_diff_angle_error",
-    "median_diff_angle_error",
-    "max_diff_angle_error",
-    "failure_rate_diff_error_gt_3deg",
+    "mean_diff_rotation_error_deg",
+    "median_diff_rotation_error_deg",
+    "max_diff_rotation_error_deg",
+    "failure_rate_diff_rotation_error_gt_3deg",
     "mean_diff_best_score",
     "mean_diff_corr_margin",
 ]
@@ -590,6 +596,12 @@ def evaluate_one(
         "ambiguity_resolved": ambiguity_resolved,
         "candidate_score_0": cand0,
         "candidate_score_180": cand180,
+        "diff_corr_shift_deg": diff_info["diff_corr_shift_deg"],
+        "diff_rotation_hat_deg": diff_info["diff_rotation_hat_deg"],
+        "diff_rotation_error_deg": diff_info["diff_rotation_error_deg"],
+        "diff_rot_corr_shift_deg": diff_rot_info["diff_corr_shift_deg"],
+        "diff_rot_rotation_hat_deg": diff_rot_info["diff_rotation_hat_deg"],
+        "diff_rot_rotation_error_deg": diff_rot_info["diff_rotation_error_deg"],
         # Legacy angle fields kept temporarily for old analysis scripts.
         "theta_gt": float(rotation_gt_deg),
         "raw_theta_shift": corr_shift_deg,
@@ -740,17 +752,17 @@ def summarize_diagnostics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     summary: list[dict[str, Any]] = []
     for alpha in sorted({float(row["diagnostic_alpha"]) for row in rows}):
         group = [row for row in rows if float(row["diagnostic_alpha"]) == alpha]
-        errors = np.asarray([float(row["diff_angle_error"]) for row in group], dtype=np.float64)
+        errors = np.asarray([float(row["diff_rotation_error_deg"]) for row in group], dtype=np.float64)
         scores = np.asarray([float(row["diff_best_score"]) for row in group], dtype=np.float64)
         margins = np.asarray([float(row["diff_corr_margin"]) for row in group], dtype=np.float64)
         summary.append(
             {
                 "diagnostic_alpha": alpha,
                 "num_images": len(group),
-                "mean_diff_angle_error": float(np.nanmean(errors)),
-                "median_diff_angle_error": float(np.nanmedian(errors)),
-                "max_diff_angle_error": float(np.nanmax(errors)),
-                "failure_rate_diff_error_gt_3deg": float(np.nanmean(errors > 3.0)),
+                "mean_diff_rotation_error_deg": float(np.nanmean(errors)),
+                "median_diff_rotation_error_deg": float(np.nanmedian(errors)),
+                "max_diff_rotation_error_deg": float(np.nanmax(errors)),
+                "failure_rate_diff_rotation_error_gt_3deg": float(np.nanmean(errors > 3.0)),
                 "mean_diff_best_score": float(np.nanmean(scores)),
                 "mean_diff_corr_margin": float(np.nanmean(margins)),
             }

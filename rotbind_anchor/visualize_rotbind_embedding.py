@@ -66,6 +66,16 @@ def normalize_z(x: np.ndarray) -> np.ndarray:
     return ((arr - arr.mean()) / (arr.std() + 1e-8)).astype(np.float32)
 
 
+def format_rotation_display(display_deg: float, mod_deg: float, period_deg: float) -> str:
+    """Format a signed display angle, including mod-period equivalence when useful."""
+    display = float(display_deg)
+    mod = float(mod_deg)
+    period = float(period_deg)
+    if abs(display - mod) < 1e-6:
+        return f"{display:.1f}°"
+    return f"{display:.1f}° (≡ {mod:.1f}° mod {period:.0f})"
+
+
 def fft_log_mag_y(y: np.ndarray) -> np.ndarray:
     """Return fftshifted log magnitude for a luminance channel."""
     return np.log1p(np.abs(np.fft.fftshift(np.fft.fft2(y)))).astype(np.float32)
@@ -341,6 +351,7 @@ def plot_correlation_curve(ax: Any, corr_info: dict[str, Any], title_prefix: str
     xs = np.arange(len(corr), dtype=np.float32) / len(corr) * 360.0
     corr_shift_deg = float(corr_info["corr_shift_deg"])
     rotation_hat_deg = float(corr_info["rotation_hat_deg"])
+    rotation_hat_display_deg = float(corr_info["rotation_hat_display_deg"])
     rotation_gt_deg = float(corr_info.get("rotation_gt_deg", np.nan))
     rotation_error_deg = float(corr_info.get("rotation_error_deg", np.nan))
     best_idx = int(corr_info["corr_info"].get("angle_bin", int(np.argmax(corr))))
@@ -357,7 +368,7 @@ def plot_correlation_curve(ax: Any, corr_info: dict[str, Any], title_prefix: str
         0.02,
         0.96,
         f"{gt_line}"
-        f"Estimated rotation: {rotation_hat_deg:.1f} deg\n"
+        f"Estimated rotation: {format_rotation_display(rotation_hat_display_deg, rotation_hat_deg, angle_period)}\n"
         f"{err_line}"
         f"Debug corr shift: {corr_shift_deg:.1f} deg\n"
         f"best peak = {corr_shift_full_deg:.1f} deg\n"
@@ -453,7 +464,8 @@ def save_grid(outdir: Path, img: np.ndarray, diagnostics: dict[str, Any], alpha:
                 (
                     "corrected_rgb\n"
                     f"GT rotation = {theta:.1f} deg\n"
-                    f"Estimated rotation = {attack['rotation_hat_deg']:.1f} deg\n"
+                    "Estimated rotation = "
+                    f"{format_rotation_display(attack['rotation_hat_display_deg'], attack['rotation_hat_deg'], attack['angle_period'])}\n"
                     f"Error = {attack['rotation_error_deg']:.1f} deg",
                     "image",
                     attack["x_corr"],
