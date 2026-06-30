@@ -204,6 +204,7 @@ def make_ring_pair_mask(
     transition: float = 0.01,
     method: str = "two_pair",
     num_ring_pairs: int = 12,
+    angular_bin_mode: str = "nearest",
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Construct an unshifted FFT-grid differential ring-pair modulation mask."""
     H = int(H)
@@ -212,6 +213,8 @@ def make_ring_pair_mask(
         raise ValueError("H and W must be positive")
     if method not in {"two_pair", "multi_ringpair"}:
         raise ValueError("method must be 'two_pair' or 'multi_ringpair'")
+    if angular_bin_mode not in {"floor", "nearest"}:
+        raise ValueError("angular_bin_mode must be 'floor' or 'nearest'")
     angular_code = make_angular_code(num_angles, key=key, mode=mode, pi_periodic=pi_periodic)
 
     ring_pairs: list[dict[str, Any]] = []
@@ -244,8 +247,12 @@ def make_ring_pair_mask(
     fx_grid, fy_grid = np.meshgrid(fx, fy)
     radius = np.sqrt(fx_grid * fx_grid + fy_grid * fy_grid).astype(np.float32)
     angle = np.mod(np.arctan2(fy_grid, fx_grid), 2.0 * np.pi)
-    angle_idx = np.floor(angle / (2.0 * np.pi) * num_angles).astype(np.int64)
-    angle_idx = np.clip(angle_idx, 0, num_angles - 1)
+    angle_pos = angle / (2.0 * np.pi) * num_angles
+    if angular_bin_mode == "floor":
+        angle_idx = np.floor(angle_pos).astype(np.int64)
+        angle_idx = np.clip(angle_idx, 0, num_angles - 1)
+    else:
+        angle_idx = np.floor(angle_pos + 0.5).astype(np.int64) % num_angles
     code_grid = angular_code[angle_idx]
 
     pair_window = np.zeros((H, W), dtype=np.float32)
@@ -279,6 +286,7 @@ def make_ring_pair_mask(
         "transition": float(transition),
         "method": method,
         "num_ring_pairs": int(len(ring_pairs)),
+        "angular_bin_mode": angular_bin_mode,
         "ring_pairs": ring_pairs,
         "angular_code": angular_code.astype(np.float32),
     }
@@ -437,6 +445,7 @@ def circular_correlation_shift(
     signature: np.ndarray,
     angular_code: np.ndarray,
     angle_period: float = 180.0,
+    refine_peak: bool = True,
 ) -> tuple[float, float, np.ndarray, dict[str, Any]]:
     """Estimate the Fourier-polar circular-correlation shift.
 
@@ -454,6 +463,7 @@ def circular_correlation_shift(
         raise ValueError("angle_period must be positive")
 
     corr = np.fft.ifft(np.fft.fft(sig) * np.conj(np.fft.fft(code))).real.astype(np.float32)
+    n = int(corr.size)
     best_idx = int(np.argmax(corr))
     best_score = float(corr[best_idx])
     if corr.size > 1:
@@ -461,11 +471,28 @@ def circular_correlation_shift(
         top2_score = float(np.min(top))
     else:
         top2_score = float("-inf")
-    corr_shift_full_deg = float(best_idx / corr.size * 360.0)
+
+    peak_refine_delta = 0.0
+    if bool(refine_peak) and n >= 3:
+        y0 = float(corr[(best_idx - 1) % n])
+        y1 = float(corr[best_idx])
+        y2 = float(corr[(best_idx + 1) % n])
+        denom = y0 - 2.0 * y1 + y2
+        if abs(denom) > 1e-12:
+            peak_refine_delta = float(np.clip(0.5 * (y0 - y2) / denom, -0.5, 0.5))
+
+    angle_bin_refined = float((best_idx + peak_refine_delta) % n)
+    corr_shift_full_deg_int = float(best_idx / n * 360.0)
+    corr_shift_full_deg = float(angle_bin_refined / n * 360.0)
     corr_shift_deg = float(corr_shift_full_deg % float(angle_period))
     extra_info: dict[str, Any] = {
-        "angle_bin": best_idx,
+        "angle_bin": angle_bin_refined,
+        "angle_bin_int": best_idx,
+        "angle_bin_refined": angle_bin_refined,
+        "peak_refine_delta": peak_refine_delta,
+        "corr_shift_full_deg_int": corr_shift_full_deg_int,
         "corr_shift_full_deg": corr_shift_full_deg,
+        "corr_shift_deg": corr_shift_deg,
         "corr_period_deg": float(angle_period),
         "top2_score": top2_score,
         "corr_margin": float(best_score - top2_score),
@@ -480,9 +507,15 @@ def circular_correlation_angle(
     signature: np.ndarray,
     angular_code: np.ndarray,
     angle_period: float = 180.0,
+    refine_peak: bool = True,
 ) -> tuple[float, float, np.ndarray, dict[str, Any]]:
     """Deprecated alias for circular_correlation_shift()."""
-    return circular_correlation_shift(signature, angular_code, angle_period=angle_period)
+    return circular_correlation_shift(
+        signature,
+        angular_code,
+        angle_period=angle_period,
+        refine_peak=refine_peak,
+    )
 
 
 def _polar_signature_from_metadata(
@@ -520,6 +553,7 @@ def detect_rotbind_angle(
     rmax: float | None = None,
     num_r: int = 64,
     resolve_ambiguity: bool = True,
+    refine_peak: bool = True,
 ) -> tuple[float, float, np.ndarray, dict[str, Any]]:
     """Detect the RotBind rotation angle from an RGB image."""
     _check_rgb_image(img_rgb)
@@ -531,6 +565,7 @@ def detect_rotbind_angle(
         signature,
         angular_code,
         angle_period=angle_period,
+        refine_peak=refine_peak,
     )
     rotation_hat_deg = shift_to_attack_angle(corr_shift_deg, angle_period=angle_period)
     extra_info: dict[str, Any] = {
@@ -548,6 +583,7 @@ def detect_rotbind_angle(
             rotation_hat_deg,
             metadata,
             num_r=num_r,
+            refine_peak=refine_peak,
         )
         extra_info["ambiguity"] = ambiguity_info
     return float(rotation_hat_deg), float(best_score), score_curve.astype(np.float32), extra_info
@@ -557,6 +593,7 @@ def rotbind_anchor_score(
     img_rgb: np.ndarray,
     metadata: dict[str, Any],
     num_r: int = 64,
+    refine_peak: bool = True,
 ) -> tuple[float, dict[str, Any]]:
     """Return the best circular-correlation anchor score for an image."""
     _check_rgb_image(img_rgb)
@@ -567,6 +604,7 @@ def rotbind_anchor_score(
         signature,
         angular_code,
         angle_period=angle_period,
+        refine_peak=refine_peak,
     )
     info: dict[str, Any] = {
         **corr_info,
@@ -587,6 +625,7 @@ def resolve_180_ambiguity(
     metadata: dict[str, Any],
     num_r: int = 64,
     rotate_mode: str = "reflect",
+    refine_peak: bool = True,
 ) -> tuple[float, dict[str, Any]]:
     """Resolve pi-periodic ambiguity by scoring two corrected candidates."""
     img = _check_rgb_image(img_rgb)
@@ -594,8 +633,18 @@ def resolve_180_ambiguity(
     rotation2 = rotation1 + 180.0
     img1 = rotate_image_keep_size(img, -rotation1, mode=rotate_mode)
     img2 = rotate_image_keep_size(img, -rotation2, mode=rotate_mode)
-    score1, info1 = rotbind_anchor_score(np.clip(img1, 0.0, 1.0).astype(np.float32), metadata, num_r=num_r)
-    score2, info2 = rotbind_anchor_score(np.clip(img2, 0.0, 1.0).astype(np.float32), metadata, num_r=num_r)
+    score1, info1 = rotbind_anchor_score(
+        np.clip(img1, 0.0, 1.0).astype(np.float32),
+        metadata,
+        num_r=num_r,
+        refine_peak=refine_peak,
+    )
+    score2, info2 = rotbind_anchor_score(
+        np.clip(img2, 0.0, 1.0).astype(np.float32),
+        metadata,
+        num_r=num_r,
+        refine_peak=refine_peak,
+    )
     if score1 >= score2:
         rotation = rotation1
         chosen = 1

@@ -1,0 +1,4 @@
+diagnostic_alpha,num_images,mean_diff_rotation_error_deg,median_diff_rotation_error_deg,max_diff_rotation_error_deg,failure_rate_diff_rotation_error_gt_3deg,mean_diff_best_score,mean_diff_corr_margin
+0.05,10,0.2,0.0,1.0,0.0,258.38538513183596,0.0
+0.1,10,0.2,0.0,1.0,0.0,258.4659698486328,0.0
+0.2,10,0.1,0.0,1.0,0.0,258.63987731933594,0.0

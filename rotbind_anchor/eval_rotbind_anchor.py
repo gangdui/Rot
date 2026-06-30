@@ -49,6 +49,9 @@ RESULT_FIELDS = [
     "rotation_error_deg",
     "corr_shift_deg",
     "corr_shift_display_deg",
+    "corr_shift_full_deg",
+    "corr_shift_full_deg_int",
+    "peak_refine_delta",
     "corr_period_deg",
     "best_score",
     "top2_score",
@@ -97,6 +100,17 @@ RESULT_FIELDS = [
     "vae_mse_symmetric_oraclecorr",
     "vae_mse_roundtrip_oracle",
     "vae_mse_anchor_removed_extra",
+    "vae_raw_mse_anchor",
+    "vae_raw_mse_clean_canonical",
+    "vae_raw_mse_clean_predcorr",
+    "vae_raw_mse_clean_oraclecorr",
+    "vae_raw_mse_roundtrip_oracle",
+    "vae_rel_mse_anchor",
+    "vae_rel_mse_clean_canonical",
+    "vae_rel_mse_clean_predcorr",
+    "vae_rel_mse_clean_oraclecorr",
+    "vae_rel_mse_roundtrip_oracle",
+    "vae_rel_mse_anchor_removed_extra",
     "vae_cos_anchor",
     "vae_cos_clean",
     "vae_cos_symmetric",
@@ -220,9 +234,11 @@ def simple_ssim(x: np.ndarray, y: np.ndarray) -> float:
 class DiffusersVaeEncoder:
     """Small deterministic wrapper around diffusers AutoencoderKL.encode."""
 
-    def __init__(self, model: Any, device: str = "cpu") -> None:
+    def __init__(self, model: Any, device: str = "cpu", use_scaling_factor: bool = True) -> None:
         self.model = model
         self.device = device
+        self.scaling_factor = float(getattr(model.config, "scaling_factor", 0.18215))
+        self.use_scaling_factor = bool(use_scaling_factor)
 
     @classmethod
     def from_pretrained(
@@ -246,8 +262,8 @@ class DiffusersVaeEncoder:
         model.eval()
         return cls(model, device=device)
 
-    def encode_images(self, images: list[np.ndarray]) -> np.ndarray:
-        """Encode RGB float images in [0, 1] into flattened latent means."""
+    def encode_images_raw(self, images: list[np.ndarray]) -> np.ndarray:
+        """Encode RGB float images in [0, 1] into flattened raw latent means."""
         import torch
 
         batch = np.stack(images, axis=0).astype(np.float32)
@@ -258,6 +274,13 @@ class DiffusersVaeEncoder:
             latent = encoded.latent_dist.mean
         return latent.detach().float().cpu().numpy().reshape(len(images), -1).astype(np.float32)
 
+    def encode_images(self, images: list[np.ndarray]) -> np.ndarray:
+        """Encode images into flattened Stable Diffusion scaled latents by default."""
+        latents = self.encode_images_raw(images)
+        if self.use_scaling_factor:
+            latents = latents * self.scaling_factor
+        return latents.astype(np.float32)
+
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray, eps: float = 1e-12) -> float:
     """Return finite cosine similarity between two flattened vectors."""
@@ -267,6 +290,13 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray, eps: float = 1e-12) -> float
     if denom <= eps:
         return 0.0
     return float(np.dot(av, bv) / denom)
+
+
+def _encode_images_raw_if_available(vae_encoder: Any, images: list[np.ndarray]) -> np.ndarray:
+    """Return raw latent means when the encoder exposes them, otherwise use encode_images."""
+    if hasattr(vae_encoder, "encode_images_raw"):
+        return vae_encoder.encode_images_raw(images)
+    return vae_encoder.encode_images(images)
 
 
 def compute_vae_footprint_metrics(
@@ -280,15 +310,37 @@ def compute_vae_footprint_metrics(
     z_original, z_anchor, z_clean, z_minus = vae_encoder.encode_images(
         [x_original, x_anchor, x_clean, x_minus]
     )
+    raw_original, raw_anchor, raw_clean, raw_minus = _encode_images_raw_if_available(
+        vae_encoder,
+        [x_original, x_anchor, x_clean, x_minus],
+    )
     z_symmetric = (z_anchor + z_minus) / 2.0
+    raw_symmetric = (raw_anchor + raw_minus) / 2.0
 
-    def mse(z: np.ndarray) -> float:
-        return float(np.mean((np.asarray(z, dtype=np.float32) - z_original) ** 2))
+    def mse(z: np.ndarray, z0: np.ndarray = z_original) -> float:
+        return float(np.mean((np.asarray(z, dtype=np.float32) - z0) ** 2))
+
+    def raw_mse(z: np.ndarray) -> float:
+        return mse(z, raw_original)
+
+    def rel_mse(z: np.ndarray) -> float:
+        return mse(z) / (float(np.mean(np.asarray(z_original, dtype=np.float32) ** 2)) + 1e-12)
 
     return {
         "vae_mse_anchor": mse(z_anchor),
         "vae_mse_clean": mse(z_clean),
         "vae_mse_symmetric": mse(z_symmetric),
+        "vae_raw_mse_anchor": raw_mse(raw_anchor),
+        "vae_raw_mse_clean_canonical": raw_mse(raw_clean),
+        "vae_raw_mse_clean_predcorr": float("nan"),
+        "vae_raw_mse_clean_oraclecorr": float("nan"),
+        "vae_raw_mse_roundtrip_oracle": float("nan"),
+        "vae_rel_mse_anchor": rel_mse(z_anchor),
+        "vae_rel_mse_clean_canonical": rel_mse(z_clean),
+        "vae_rel_mse_clean_predcorr": float("nan"),
+        "vae_rel_mse_clean_oraclecorr": float("nan"),
+        "vae_rel_mse_roundtrip_oracle": float("nan"),
+        "vae_rel_mse_anchor_removed_extra": float("nan"),
         "vae_cos_anchor": cosine_similarity(z_anchor, z_original),
         "vae_cos_clean": cosine_similarity(z_clean, z_original),
         "vae_cos_symmetric": cosine_similarity(z_symmetric, z_original),
@@ -310,6 +362,19 @@ def compute_rotated_corrected_vae_metrics(
     x_roundtrip_oracle: np.ndarray,
 ) -> dict[str, float]:
     """Compute VAE metrics for canonical, predicted-corrected, and oracle-corrected variants."""
+    images = [
+        x_original,
+        x_plus_canonical,
+        x_plus_predcorr,
+        x_plus_oraclecorr,
+        x_clean_canonical,
+        x_clean_predcorr,
+        x_clean_oraclecorr,
+        x_minus_canonical,
+        x_minus_predcorr,
+        x_minus_oraclecorr,
+        x_roundtrip_oracle,
+    ]
     (
         z_original,
         z_plus_canonical,
@@ -322,27 +387,34 @@ def compute_rotated_corrected_vae_metrics(
         z_minus_predcorr,
         z_minus_oraclecorr,
         z_roundtrip_oracle,
-    ) = vae_encoder.encode_images(
-        [
-            x_original,
-            x_plus_canonical,
-            x_plus_predcorr,
-            x_plus_oraclecorr,
-            x_clean_canonical,
-            x_clean_predcorr,
-            x_clean_oraclecorr,
-            x_minus_canonical,
-            x_minus_predcorr,
-            x_minus_oraclecorr,
-            x_roundtrip_oracle,
-        ]
-    )
+    ) = vae_encoder.encode_images(images)
+    (
+        raw_original,
+        raw_plus_canonical,
+        raw_plus_predcorr,
+        raw_plus_oraclecorr,
+        raw_clean_canonical,
+        raw_clean_predcorr,
+        raw_clean_oraclecorr,
+        raw_minus_canonical,
+        raw_minus_predcorr,
+        raw_minus_oraclecorr,
+        raw_roundtrip_oracle,
+    ) = _encode_images_raw_if_available(vae_encoder, images)
     z_symmetric_canonical = (z_plus_canonical + z_minus_canonical) / 2.0
     z_symmetric_predcorr = (z_plus_predcorr + z_minus_predcorr) / 2.0
     z_symmetric_oraclecorr = (z_plus_oraclecorr + z_minus_oraclecorr) / 2.0
 
-    def mse(z: np.ndarray) -> float:
-        return float(np.mean((np.asarray(z, dtype=np.float32) - z_original) ** 2))
+    def mse(z: np.ndarray, z0: np.ndarray = z_original) -> float:
+        return float(np.mean((np.asarray(z, dtype=np.float32) - z0) ** 2))
+
+    def raw_mse(z: np.ndarray) -> float:
+        return mse(z, raw_original)
+
+    z_original_energy = float(np.mean(np.asarray(z_original, dtype=np.float32) ** 2)) + 1e-12
+
+    def rel_mse(z: np.ndarray) -> float:
+        return mse(z) / z_original_energy
 
     metrics = {
         "vae_mse_anchor": mse(z_plus_canonical),
@@ -353,6 +425,16 @@ def compute_rotated_corrected_vae_metrics(
         "vae_mse_symmetric_predcorr": mse(z_symmetric_predcorr),
         "vae_mse_symmetric_oraclecorr": mse(z_symmetric_oraclecorr),
         "vae_mse_roundtrip_oracle": mse(z_roundtrip_oracle),
+        "vae_raw_mse_anchor": raw_mse(raw_plus_canonical),
+        "vae_raw_mse_clean_canonical": raw_mse(raw_clean_canonical),
+        "vae_raw_mse_clean_predcorr": raw_mse(raw_clean_predcorr),
+        "vae_raw_mse_clean_oraclecorr": raw_mse(raw_clean_oraclecorr),
+        "vae_raw_mse_roundtrip_oracle": raw_mse(raw_roundtrip_oracle),
+        "vae_rel_mse_anchor": rel_mse(z_plus_canonical),
+        "vae_rel_mse_clean_canonical": rel_mse(z_clean_canonical),
+        "vae_rel_mse_clean_predcorr": rel_mse(z_clean_predcorr),
+        "vae_rel_mse_clean_oraclecorr": rel_mse(z_clean_oraclecorr),
+        "vae_rel_mse_roundtrip_oracle": rel_mse(z_roundtrip_oracle),
         "vae_cos_anchor": cosine_similarity(z_plus_canonical, z_original),
         "vae_cos_clean_canonical": cosine_similarity(z_clean_canonical, z_original),
         "vae_cos_clean_predcorr": cosine_similarity(z_clean_predcorr, z_original),
@@ -364,6 +446,9 @@ def compute_rotated_corrected_vae_metrics(
     }
     metrics["vae_mse_anchor_removed_extra"] = (
         metrics["vae_mse_clean_oraclecorr"] - metrics["vae_mse_roundtrip_oracle"]
+    )
+    metrics["vae_rel_mse_anchor_removed_extra"] = (
+        metrics["vae_rel_mse_clean_oraclecorr"] - metrics["vae_rel_mse_roundtrip_oracle"]
     )
     metrics["vae_mse_clean"] = metrics["vae_mse_clean_canonical"]
     metrics["vae_mse_symmetric"] = metrics["vae_mse_symmetric_canonical"]
@@ -386,6 +471,17 @@ def nan_vae_metrics() -> dict[str, float]:
         "vae_mse_symmetric_oraclecorr": float("nan"),
         "vae_mse_roundtrip_oracle": float("nan"),
         "vae_mse_anchor_removed_extra": float("nan"),
+        "vae_raw_mse_anchor": float("nan"),
+        "vae_raw_mse_clean_canonical": float("nan"),
+        "vae_raw_mse_clean_predcorr": float("nan"),
+        "vae_raw_mse_clean_oraclecorr": float("nan"),
+        "vae_raw_mse_roundtrip_oracle": float("nan"),
+        "vae_rel_mse_anchor": float("nan"),
+        "vae_rel_mse_clean_canonical": float("nan"),
+        "vae_rel_mse_clean_predcorr": float("nan"),
+        "vae_rel_mse_clean_oraclecorr": float("nan"),
+        "vae_rel_mse_roundtrip_oracle": float("nan"),
+        "vae_rel_mse_anchor_removed_extra": float("nan"),
         "vae_cos_anchor": float("nan"),
         "vae_cos_clean": float("nan"),
         "vae_cos_symmetric": float("nan"),
@@ -465,6 +561,7 @@ def diagnostic_diff_feature(
     metadata: dict[str, Any],
     num_r: int,
     expected_theta: float = 0.0,
+    refine_peak: bool = True,
 ) -> dict[str, float]:
     """Correlate PolarFeature(x_anchor)-PolarFeature(x) against the angular code."""
     pos_bands = metadata["pos_bands"]
@@ -495,6 +592,7 @@ def diagnostic_diff_feature(
         signature,
         metadata["angular_code"],
         angle_period=angle_period,
+        refine_peak=refine_peak,
     )
     rotation_hat_deg = shift_to_attack_angle(corr_shift_deg, angle_period=angle_period)
     rotation_error_deg = circular_angle_error(rotation_hat_deg, expected_theta, period=angle_period)
@@ -525,10 +623,11 @@ def evaluate_one(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Evaluate one image/alpha/angle sample and return CSV row plus artifacts."""
     start = time.perf_counter()
+    refine_peak = not bool(args.no_refine_peak)
     x_anchor = embed_rotbind_anchor_rgb(img, modulation_grid, alpha)
     x_clean_canonical = remove_rotbind_anchor_rgb(x_anchor, modulation_grid, alpha)
     x_minus_canonical = make_negative_anchor_rgb(x_anchor, modulation_grid, alpha)
-    diff_info = diagnostic_diff_feature(img, x_anchor, metadata, int(args.num_r))
+    diff_info = diagnostic_diff_feature(img, x_anchor, metadata, int(args.num_r), refine_peak=refine_peak)
     x_att = rotate_image_keep_size(x_anchor, rotation_gt_deg)
     x_rot_original = rotate_image_keep_size(img, rotation_gt_deg)
     x_roundtrip_oracle = rotate_image_keep_size(x_rot_original, -float(rotation_gt_deg))
@@ -539,6 +638,7 @@ def evaluate_one(
         metadata,
         int(args.num_r),
         expected_theta=float(rotation_gt_deg),
+        refine_peak=refine_peak,
     )
     angle_period = 180.0 if bool(metadata.get("pi_periodic", True)) else 360.0
     rotation_hat_deg, best_score, score_curve, info = detect_rotbind_angle(
@@ -546,6 +646,7 @@ def evaluate_one(
         metadata,
         num_r=int(args.num_r),
         resolve_ambiguity=False,
+        refine_peak=refine_peak,
     )
     corr_shift_deg = float(info.get("corr_shift_deg", float("nan")))
     rotation_error_deg = circular_angle_error(rotation_hat_deg, rotation_gt_deg, period=angle_period)
@@ -589,6 +690,9 @@ def evaluate_one(
         "rotation_error_deg": rotation_error_deg,
         "corr_shift_deg": corr_shift_deg,
         "corr_shift_display_deg": wrap_angle_signed(corr_shift_deg, period=angle_period),
+        "corr_shift_full_deg": float(info.get("corr_shift_full_deg", float("nan"))),
+        "corr_shift_full_deg_int": float(info.get("corr_shift_full_deg_int", float("nan"))),
+        "peak_refine_delta": float(info.get("peak_refine_delta", float("nan"))),
         "corr_period_deg": float(info.get("corr_period_deg", angle_period)),
         "best_score": float(best_score),
         "top2_score": float(info.get("top2_score", float("nan"))),
@@ -728,6 +832,7 @@ def evaluate_diagnostic_alphas(
             key=int(args.key),
             method=args.method,
             num_ring_pairs=int(args.num_ring_pairs),
+            angular_bin_mode=args.angular_bin_mode,
         )
         for alpha in args.diagnostic_alphas:
             x_anchor = embed_rotbind_anchor_rgb(img, modulation_grid, float(alpha))
@@ -736,6 +841,7 @@ def evaluate_diagnostic_alphas(
                 x_anchor,
                 metadata,
                 int(args.num_r),
+                refine_peak=not bool(args.no_refine_peak),
             )
             rows.append(
                 {
@@ -934,6 +1040,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--key", type=int, default=0)
     parser.add_argument("--num-r", type=int, default=64)
     parser.add_argument("--num-angles", type=int, default=360)
+    parser.add_argument("--no-refine-peak", action="store_true")
+    parser.add_argument("--angular-bin-mode", choices=["nearest", "floor"], default="nearest")
     parser.add_argument("--example-alpha", type=float, default=0.01)
     parser.add_argument("--example-theta", type=float, default=45.0)
     parser.add_argument("--max-images", type=int)
@@ -990,6 +1098,7 @@ def main(argv: list[str] | None = None) -> int:
             key=int(args.key),
             method=args.method,
             num_ring_pairs=int(args.num_ring_pairs),
+            angular_bin_mode=args.angular_bin_mode,
         )
         image_id = image_path.stem if image_path.stem else f"image_{image_index:04d}"
         for alpha in args.alphas:

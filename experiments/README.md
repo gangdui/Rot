@@ -51,3 +51,17 @@ rotation_hat_deg = (-corr_shift_deg) mod 180
 `rotation_hat_deg` is the only angle reported in main results. For readable
 plots, `rotation_hat_display_deg` is shown in `[-90 deg, 90 deg)`, so `179 deg`
 is displayed as `-1 deg`.
+
+## VAE Footprint Metrics
+
+Raw VAE latent mean MSE is scale-dependent and unbounded, because it is measured
+directly on `latent_dist.mean`. Main reported VAE MSE fields use Stable
+Diffusion scaled latents:
+
+```text
+z = scaling_factor * latent_dist.mean
+```
+
+The debug `vae_raw_mse_*` fields keep the unscaled latent mean MSE for
+traceability. Cosine similarity and `vae_rel_mse_*` should be interpreted
+together with the scaled MSE values.

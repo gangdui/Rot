@@ -354,7 +354,7 @@ def plot_correlation_curve(ax: Any, corr_info: dict[str, Any], title_prefix: str
     rotation_hat_display_deg = float(corr_info["rotation_hat_display_deg"])
     rotation_gt_deg = float(corr_info.get("rotation_gt_deg", np.nan))
     rotation_error_deg = float(corr_info.get("rotation_error_deg", np.nan))
-    best_idx = int(corr_info["corr_info"].get("angle_bin", int(np.argmax(corr))))
+    best_idx = int(corr_info["corr_info"].get("angle_bin_int", int(np.argmax(corr))))
     corr_shift_full_deg = float(
         corr_info["corr_info"].get("corr_shift_full_deg", corr_info["corr_info"].get("theta_full", best_idx / len(corr) * 360.0))
     )
