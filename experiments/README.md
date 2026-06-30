@@ -12,12 +12,19 @@ The current main configuration is:
 ```text
 method: two_pair
 rotation convention: raw corr shift converted to image rotation
-alpha: 0.12, 0.15, 0.18
+primary alpha: 0.15
 ```
+
+Historical alpha sweeps are kept only in archive/debug directories unless
+explicitly regenerated with the current rotation and quality-metric
+definitions.
 
 `multi_ringpair` is kept as an ablation method for comparison.
 
-`current/vae_footprint_two_pair/` contains the current VAE footprint-only run. It does not include DDIM inversion or any original watermark detector.
+`current/rotation_sync_same_size_zfill_vae/` is the reserved current directory
+for scaled VAE footprint metrics under the literature-aligned same-size
+zero-fill rotation attack. It does not include DDIM inversion or any original
+watermark detector.
 
 ## Dataset Hygiene
 
@@ -68,8 +75,7 @@ together with the scaled MSE values.
 
 ## Rotation Attack Benchmark
 
-Main robustness benchmarks use a literature-aligned same-size zero-fill
-rotation attack:
+Main robustness benchmarks use a literature-aligned same-size zero-fill rotation attack:
 
 - torchvision rotation
 - attack interpolation = nearest
@@ -79,10 +85,9 @@ rotation attack:
 - correction fill = 0
 
 This follows the common same-size zero-fill rotation setup used in prior
-watermark robustness evaluations. It is not specific to Tree-Ring. Internal
-diagnostics may additionally report scipy bilinear reflect rotation
-(`reshape=False`, `order=1`, `mode="reflect"`), but that is not the main
-comparison setting.
+watermark robustness evaluations. This setup is a benchmark rotation definition rather than a method-specific setting. Internal diagnostics may additionally
+report scipy bilinear reflect rotation (`reshape=False`, `order=1`,
+`mode="reflect"`), but that is not the main comparison setting.
 
 ## PSNR/SSIM Quality Metrics
 

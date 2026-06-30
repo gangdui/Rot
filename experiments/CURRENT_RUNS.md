@@ -1,7 +1,7 @@
 # Current RotBind Runs
 
-Current experiment names describe the method and attack definition. Avoid old
-Tree-Ring-specific directory labels for this rotation setting.
+Current experiment names describe the method and attack definition. Avoid
+method-specific directory labels for this benchmark rotation setting.
 
 ## Recognized Current Directories
 
@@ -13,7 +13,9 @@ Tree-Ring-specific directory labels for this rotation setting.
   Same configuration as `rotation_sync_same_size_zfill`, plus scaled VAE
   latent MSE, relative MSE, and cosine metrics. This directory should be
   regenerated only when the VAE weights are available locally or through a
-  working Hugging Face endpoint.
+  working Hugging Face endpoint. At the time of cleanup this directory may
+  contain only a README placeholder until the scaled VAE run is regenerated
+  with the current evaluator.
 
 - `current/embedding_process_same_size_zfill_alpha015`
   Visualization-only diagnostics for the RotBind embedding process at
@@ -36,7 +38,8 @@ attack:
 - correction fill = 0
 
 This follows the common same-size zero-fill rotation setup used in prior
-watermark robustness evaluations. It is not specific to Tree-Ring.
+watermark robustness evaluations. This setup is a benchmark rotation definition
+rather than a method-specific setting.
 
 ## Archived Results
 
