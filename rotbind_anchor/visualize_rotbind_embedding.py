@@ -25,6 +25,7 @@ from rotbind_anchor.rotbind_anchor import (  # noqa: E402
     remove_rotbind_anchor_rgb,
     rgb_to_ycbcr,
     rotate_image_keep_size,
+    rotate_image_torchvision_keep_size,
     shift_to_attack_angle,
     wrap_angle_signed,
 )
@@ -79,6 +80,15 @@ def format_rotation_display(display_deg: float, mod_deg: float, period_deg: floa
 def fft_log_mag_y(y: np.ndarray) -> np.ndarray:
     """Return fftshifted log magnitude for a luminance channel."""
     return np.log1p(np.abs(np.fft.fftshift(np.fft.fft2(y)))).astype(np.float32)
+
+
+def rotate_with_config(img: np.ndarray, angle: float, backend: str, interpolation: str, fill: float) -> np.ndarray:
+    """Rotate with either Tree-Ring-like torchvision settings or scipy diagnostics."""
+    if backend == "torchvision":
+        return rotate_image_torchvision_keep_size(img, angle, interpolation=interpolation, fill=fill)
+    if backend == "scipy":
+        return rotate_image_keep_size(img, angle, mode="reflect", order=1)
+    raise ValueError("rotation backend must be 'torchvision' or 'scipy'")
 
 
 def matplotlib_pyplot():
@@ -206,7 +216,19 @@ def compute_signature_and_corr(
     }
 
 
-def build_diagnostics(img: np.ndarray, alpha: float, method: str, key: int, theta: float) -> dict[str, Any]:
+def build_diagnostics(
+    img: np.ndarray,
+    alpha: float,
+    method: str,
+    key: int,
+    theta: float,
+    attack_backend: str,
+    attack_interpolation: str,
+    attack_fill: float,
+    correction_backend: str,
+    correction_interpolation: str,
+    correction_fill: float,
+) -> dict[str, Any]:
     """Build all RotBind visualization diagnostics from actual module functions."""
     h, w = img.shape[:2]
     mask, metadata = make_ring_pair_mask(h, w, num_angles=360, key=key, method=method)
@@ -220,7 +242,13 @@ def build_diagnostics(img: np.ndarray, alpha: float, method: str, key: int, thet
 
     attack: dict[str, Any] | None = None
     if abs(float(theta)) > 1e-12:
-        x_att = rotate_image_keep_size(anchored, float(theta))
+        x_att = rotate_with_config(
+            anchored,
+            float(theta),
+            attack_backend,
+            attack_interpolation,
+            float(attack_fill),
+        )
         rotation_hat_deg, score, corr, info = detect_rotbind_angle(
             np.clip(x_att, 0.0, 1.0).astype(np.float32),
             metadata,
@@ -230,7 +258,13 @@ def build_diagnostics(img: np.ndarray, alpha: float, method: str, key: int, thet
         angle_period = 180.0 if metadata.get("pi_periodic", True) else 360.0
         corr_shift_deg = float(info.get("corr_shift_deg", float("nan")))
         rotation_error_deg = circular_angle_error(rotation_hat_deg, theta, period=angle_period)
-        x_corr = rotate_image_keep_size(x_att, -rotation_hat_deg)
+        x_corr = rotate_with_config(
+            x_att,
+            -rotation_hat_deg,
+            correction_backend,
+            correction_interpolation,
+            float(correction_fill),
+        )
         x_corr = np.clip(x_corr, 0.0, 1.0).astype(np.float32)
         x_clean = remove_rotbind_anchor_rgb(x_corr, mask, alpha)
         attack = {
@@ -247,6 +281,12 @@ def build_diagnostics(img: np.ndarray, alpha: float, method: str, key: int, thet
             "corr": corr,
             "corr_info": info,
             "angle_period": angle_period,
+            "attack_rotation_backend": attack_backend,
+            "attack_rotation_interpolation": attack_interpolation,
+            "attack_rotation_fill": float(attack_fill),
+            "correction_rotation_backend": correction_backend,
+            "correction_rotation_interpolation": correction_interpolation,
+            "correction_rotation_fill": float(correction_fill),
             # Deprecated compatibility aliases.
             "theta_shift": corr_shift_deg,
             "theta_attack_hat": rotation_hat_deg,
@@ -269,6 +309,12 @@ def build_diagnostics(img: np.ndarray, alpha: float, method: str, key: int, thet
         "ring_bands": ring_bands_rgb((h, w), metadata),
         **canonical_corr,
         "attack": attack,
+        "attack_rotation_backend": attack_backend,
+        "attack_rotation_interpolation": attack_interpolation,
+        "attack_rotation_fill": float(attack_fill),
+        "correction_rotation_backend": correction_backend,
+        "correction_rotation_interpolation": correction_interpolation,
+        "correction_rotation_fill": float(correction_fill),
     }
 
 
@@ -438,7 +484,15 @@ def save_grid(outdir: Path, img: np.ndarray, diagnostics: dict[str, Any], alpha:
     plt, _ = matplotlib_pyplot()
     anchored = diagnostics["anchored"]
     diff_x50 = np.clip((anchored - img) * 50.0 + 0.5, 0.0, 1.0)
-    title_suffix = f"alpha={alpha:g}, method={method}, key={key}"
+    attack_desc = (
+        f"attack rotation: {diagnostics['attack_rotation_backend']} "
+        f"{diagnostics['attack_rotation_interpolation']} fill={diagnostics['attack_rotation_fill']:g}"
+    )
+    correction_desc = (
+        f"correction rotation: {diagnostics['correction_rotation_backend']} "
+        f"{diagnostics['correction_rotation_interpolation']} fill={diagnostics['correction_rotation_fill']:g}"
+    )
+    title_suffix = f"alpha={alpha:g}, method={method}, key={key}\n{attack_desc}\n{correction_desc}"
     attack = diagnostics["attack"]
 
     base_panels = [
@@ -520,6 +574,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--angle", type=float, default=None, help="Deprecated alias for --theta")
     parser.add_argument("--key", type=int, default=0)
     parser.add_argument("--size", type=int, default=512)
+    parser.add_argument("--attack-rotation-backend", choices=["torchvision", "scipy"], default="torchvision")
+    parser.add_argument("--attack-rotation-interpolation", choices=["nearest", "bilinear"], default="nearest")
+    parser.add_argument("--attack-rotation-fill", type=float, default=0.0)
+    parser.add_argument("--correction-rotation-backend", choices=["torchvision", "scipy"], default="torchvision")
+    parser.add_argument("--correction-rotation-interpolation", choices=["nearest", "bilinear"], default="bilinear")
+    parser.add_argument("--correction-rotation-fill", type=float, default=0.0)
     return parser.parse_args(argv)
 
 
@@ -531,7 +591,19 @@ def main(argv: list[str] | None = None) -> int:
     outdir.mkdir(parents=True, exist_ok=True)
 
     img = load_rgb(Path(args.image), args.size)
-    diagnostics = build_diagnostics(img, args.alpha, args.method, args.key, theta)
+    diagnostics = build_diagnostics(
+        img,
+        args.alpha,
+        args.method,
+        args.key,
+        theta,
+        args.attack_rotation_backend,
+        args.attack_rotation_interpolation,
+        float(args.attack_rotation_fill),
+        args.correction_rotation_backend,
+        args.correction_rotation_interpolation,
+        float(args.correction_rotation_fill),
+    )
     anchored = diagnostics["anchored"]
 
     diff_raw = np.clip(anchored - img + 0.5, 0.0, 1.0)

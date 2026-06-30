@@ -32,6 +32,7 @@ from rotbind_anchor.rotbind_anchor import (  # noqa: E402
     make_ring_pair_mask,
     remove_rotbind_anchor_rgb,
     rotate_image_keep_size,
+    rotate_image_torchvision_keep_size,
     shift_to_attack_angle,
     wrap_angle_signed,
 )
@@ -42,6 +43,12 @@ RESULT_FIELDS = [
     "image_id",
     "image_path",
     "alpha",
+    "attack_rotation_backend",
+    "attack_rotation_interpolation",
+    "attack_rotation_fill",
+    "correction_rotation_backend",
+    "correction_rotation_interpolation",
+    "correction_rotation_fill",
     "rotation_gt_deg",
     "rotation_gt_mod180_deg",
     "rotation_hat_deg",
@@ -126,6 +133,12 @@ RESULT_FIELDS = [
 SUMMARY_FIELDS = [
     "method",
     "alpha",
+    "attack_rotation_backend",
+    "attack_rotation_interpolation",
+    "attack_rotation_fill",
+    "correction_rotation_backend",
+    "correction_rotation_interpolation",
+    "correction_rotation_fill",
     "num_samples",
     "mean_rotation_error_deg",
     "median_rotation_error_deg",
@@ -509,6 +522,26 @@ def apply_angle_sign(theta_shift: float, angle_sign: str, angle_period: float = 
     raise ValueError("angle_sign must be raw or neg")
 
 
+def rotate_with_config(
+    img: np.ndarray,
+    angle: float,
+    backend: str,
+    interpolation: str,
+    fill: float,
+) -> np.ndarray:
+    """Rotate an image using an experiment-configured backend."""
+    if backend == "torchvision":
+        return rotate_image_torchvision_keep_size(
+            img,
+            angle,
+            interpolation=interpolation,
+            fill=fill,
+        )
+    if backend == "scipy":
+        return rotate_image_keep_size(img, angle, mode="reflect", order=1)
+    raise ValueError("rotation backend must be 'torchvision' or 'scipy'")
+
+
 def make_synthetic_images(size: int) -> list[np.ndarray]:
     """Create simple synthetic calibration images."""
     n = int(size)
@@ -628,9 +661,27 @@ def evaluate_one(
     x_clean_canonical = remove_rotbind_anchor_rgb(x_anchor, modulation_grid, alpha)
     x_minus_canonical = make_negative_anchor_rgb(x_anchor, modulation_grid, alpha)
     diff_info = diagnostic_diff_feature(img, x_anchor, metadata, int(args.num_r), refine_peak=refine_peak)
-    x_att = rotate_image_keep_size(x_anchor, rotation_gt_deg)
-    x_rot_original = rotate_image_keep_size(img, rotation_gt_deg)
-    x_roundtrip_oracle = rotate_image_keep_size(x_rot_original, -float(rotation_gt_deg))
+    x_att = rotate_with_config(
+        x_anchor,
+        rotation_gt_deg,
+        args.attack_rotation_backend,
+        args.attack_rotation_interpolation,
+        float(args.attack_rotation_fill),
+    )
+    x_rot_original = rotate_with_config(
+        img,
+        rotation_gt_deg,
+        args.attack_rotation_backend,
+        args.attack_rotation_interpolation,
+        float(args.attack_rotation_fill),
+    )
+    x_roundtrip_oracle = rotate_with_config(
+        x_rot_original,
+        -float(rotation_gt_deg),
+        args.correction_rotation_backend,
+        args.correction_rotation_interpolation,
+        float(args.correction_rotation_fill),
+    )
     x_roundtrip_oracle = np.clip(x_roundtrip_oracle, 0.0, 1.0).astype(np.float32)
     diff_rot_info = diagnostic_diff_feature(
         np.clip(x_rot_original, 0.0, 1.0).astype(np.float32),
@@ -650,11 +701,23 @@ def evaluate_one(
     )
     corr_shift_deg = float(info.get("corr_shift_deg", float("nan")))
     rotation_error_deg = circular_angle_error(rotation_hat_deg, rotation_gt_deg, period=angle_period)
-    x_corr = rotate_image_keep_size(x_att, -rotation_hat_deg)
+    x_corr = rotate_with_config(
+        x_att,
+        -rotation_hat_deg,
+        args.correction_rotation_backend,
+        args.correction_rotation_interpolation,
+        float(args.correction_rotation_fill),
+    )
     x_corr = np.clip(x_corr, 0.0, 1.0).astype(np.float32)
     x_clean = remove_rotbind_anchor_rgb(x_corr, modulation_grid, alpha)
     x_minus = make_negative_anchor_rgb(x_corr, modulation_grid, alpha)
-    x_oracle_corr = rotate_image_keep_size(x_att, -float(rotation_gt_deg))
+    x_oracle_corr = rotate_with_config(
+        x_att,
+        -float(rotation_gt_deg),
+        args.correction_rotation_backend,
+        args.correction_rotation_interpolation,
+        float(args.correction_rotation_fill),
+    )
     x_oracle_corr = np.clip(x_oracle_corr, 0.0, 1.0).astype(np.float32)
     x_clean_oracle = remove_rotbind_anchor_rgb(x_oracle_corr, modulation_grid, alpha)
     x_minus_oracle = make_negative_anchor_rgb(x_oracle_corr, modulation_grid, alpha)
@@ -683,6 +746,12 @@ def evaluate_one(
         "image_id": image_id,
         "image_path": str(image_path),
         "alpha": float(alpha),
+        "attack_rotation_backend": args.attack_rotation_backend,
+        "attack_rotation_interpolation": args.attack_rotation_interpolation,
+        "attack_rotation_fill": float(args.attack_rotation_fill),
+        "correction_rotation_backend": args.correction_rotation_backend,
+        "correction_rotation_interpolation": args.correction_rotation_interpolation,
+        "correction_rotation_fill": float(args.correction_rotation_fill),
         "rotation_gt_deg": float(rotation_gt_deg),
         "rotation_gt_mod180_deg": float(rotation_gt_deg % 180.0),
         "rotation_hat_deg": float(rotation_hat_deg),
@@ -745,6 +814,12 @@ def evaluate_one(
         "rotation_hat_deg": rotation_hat_deg,
         "rotation_error_deg": rotation_error_deg,
         "corr_shift_deg": corr_shift_deg,
+        "attack_rotation_backend": args.attack_rotation_backend,
+        "attack_rotation_interpolation": args.attack_rotation_interpolation,
+        "attack_rotation_fill": float(args.attack_rotation_fill),
+        "correction_rotation_backend": args.correction_rotation_backend,
+        "correction_rotation_interpolation": args.correction_rotation_interpolation,
+        "correction_rotation_fill": float(args.correction_rotation_fill),
         # Legacy aliases.
         "theta_gt": rotation_gt_deg,
         "theta_hat": rotation_hat_deg,
@@ -792,6 +867,12 @@ def summarize(rows: list[dict[str, Any]], method: str = "unknown") -> list[dict[
             {
                 "method": method,
                 "alpha": alpha,
+                "attack_rotation_backend": group[0].get("attack_rotation_backend", "unknown"),
+                "attack_rotation_interpolation": group[0].get("attack_rotation_interpolation", "unknown"),
+                "attack_rotation_fill": float(group[0].get("attack_rotation_fill", float("nan"))),
+                "correction_rotation_backend": group[0].get("correction_rotation_backend", "unknown"),
+                "correction_rotation_interpolation": group[0].get("correction_rotation_interpolation", "unknown"),
+                "correction_rotation_fill": float(group[0].get("correction_rotation_fill", float("nan"))),
                 "num_samples": len(group),
                 "mean_rotation_error_deg": float(np.nanmean(rotation_error)),
                 "median_rotation_error_deg": float(np.nanmedian(rotation_error)),
@@ -1042,6 +1123,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-angles", type=int, default=360)
     parser.add_argument("--no-refine-peak", action="store_true")
     parser.add_argument("--angular-bin-mode", choices=["nearest", "floor"], default="nearest")
+    parser.add_argument("--attack-rotation-backend", choices=["torchvision", "scipy"], default="torchvision")
+    parser.add_argument("--attack-rotation-interpolation", choices=["nearest", "bilinear"], default="nearest")
+    parser.add_argument("--attack-rotation-fill", type=float, default=0.0)
+    parser.add_argument("--correction-rotation-backend", choices=["torchvision", "scipy"], default="torchvision")
+    parser.add_argument("--correction-rotation-interpolation", choices=["nearest", "bilinear"], default="bilinear")
+    parser.add_argument("--correction-rotation-fill", type=float, default=0.0)
     parser.add_argument("--example-alpha", type=float, default=0.01)
     parser.add_argument("--example-theta", type=float, default=45.0)
     parser.add_argument("--max-images", type=int)

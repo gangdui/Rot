@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from PIL import Image
 from scipy import ndimage
 
 
@@ -117,8 +118,21 @@ def wrap_angle_signed(theta: float, period: float = 180.0) -> float:
     return float((float(theta) + period / 2.0) % period - period / 2.0)
 
 
-def rotate_image_keep_size(img: np.ndarray, angle: float, mode: str = "reflect") -> np.ndarray:
-    """Rotate a 2D or RGB image with scipy.ndimage.rotate while preserving shape."""
+def rotate_image_keep_size(
+    img: np.ndarray,
+    angle: float,
+    mode: str = "reflect",
+    order: int = 1,
+    backend: str = "scipy",
+) -> np.ndarray:
+    """Rotate with scipy.ndimage.rotate, preserving shape.
+
+    This is the internal diagnostic rotation backend. The default is scipy
+    bilinear interpolation with reflect padding: reshape=False, order=1,
+    mode="reflect", prefilter=False.
+    """
+    if backend != "scipy":
+        raise ValueError("rotate_image_keep_size only supports backend='scipy'")
     arr = _as_float32_array(img, "img")
     if arr.ndim not in (2, 3):
         raise ValueError("img must be a 2D array or an RGB image")
@@ -129,11 +143,44 @@ def rotate_image_keep_size(img: np.ndarray, angle: float, mode: str = "reflect")
         float(angle),
         axes=(0, 1),
         reshape=False,
-        order=1,
+        order=int(order),
         mode=mode,
         prefilter=False,
     )
     return rotated.astype(np.float32)
+
+
+def rotate_image_torchvision_keep_size(
+    img: np.ndarray,
+    angle: float,
+    interpolation: str = "nearest",
+    fill: float = 0.0,
+) -> np.ndarray:
+    """Rotate an RGB float image with torchvision, matching Tree-Ring-like rotation.
+
+    This matches Tree-Ring public-code style rotation when interpolation is
+    "nearest", expand=False, center=None, and fill=0.
+    """
+    arr = _check_rgb_image(img, "img")
+    if interpolation not in {"nearest", "bilinear"}:
+        raise ValueError("interpolation must be 'nearest' or 'bilinear'")
+    from torchvision.transforms import InterpolationMode
+    import torchvision.transforms.functional as tvf
+
+    mode = InterpolationMode.NEAREST if interpolation == "nearest" else InterpolationMode.BILINEAR
+    pil = Image.fromarray((np.clip(arr, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8), mode="RGB")
+    rotated = tvf.rotate(
+        pil,
+        float(angle),
+        interpolation=mode,
+        expand=False,
+        center=None,
+        fill=float(fill),
+    )
+    out = np.asarray(rotated.convert("RGB"), dtype=np.float32) / 255.0
+    if out.shape != arr.shape:
+        raise RuntimeError(f"torchvision rotation changed shape from {arr.shape} to {out.shape}")
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
 def make_angular_code(

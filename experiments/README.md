@@ -65,3 +65,17 @@ z = scaling_factor * latent_dist.mean
 The debug `vae_raw_mse_*` fields keep the unscaled latent mean MSE for
 traceability. Cosine similarity and `vae_rel_mse_*` should be interpreted
 together with the scaled MSE values.
+
+## Rotation Attack Benchmark
+
+Main robustness benchmarks use Tree-Ring-like rotation distortion:
+
+- torchvision rotation
+- nearest interpolation for the attack
+- `expand=False`
+- `fill=0`
+
+The default correction rotation uses torchvision bilinear interpolation with
+`fill=0`. Internal diagnostics may additionally report scipy bilinear reflect
+rotation (`reshape=False`, `order=1`, `mode="reflect"`), but that is not the
+main comparison setting.
