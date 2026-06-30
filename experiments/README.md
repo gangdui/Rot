@@ -79,3 +79,22 @@ The default correction rotation uses torchvision bilinear interpolation with
 `fill=0`. Internal diagnostics may additionally report scipy bilinear reflect
 rotation (`reshape=False`, `order=1`, `mode="reflect"`), but that is not the
 main comparison setting.
+
+## PSNR/SSIM Quality Metrics
+
+`psnr_anchor` / `ssim_anchor` measure before-attack anchor imperceptibility in
+the original image geometry.
+
+`psnr_anchor_rotated` / `ssim_anchor_rotated` measure after-attack
+imperceptibility under matched rotated geometry: rotated original image versus
+rotated anchored image.
+
+`psnr_clean_*_vs_roundtrip_*` / `ssim_clean_*_vs_roundtrip_*` measure anchor
+removal quality under matched geometry after predicted or oracle correction.
+These are the preferred removal-quality fields.
+
+`psnr_clean` / `ssim_clean` are legacy post-attack full-image quality aliases
+for `psnr_postattack_clean_to_original` / `ssim_postattack_clean_to_original`.
+They compare the corrected-and-cleaned image to the original image and are
+dominated by rotation roundtrip artifacts, so they should not be used as anchor
+quality metrics.

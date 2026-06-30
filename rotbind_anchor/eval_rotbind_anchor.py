@@ -39,6 +39,25 @@ from rotbind_anchor.rotbind_anchor import (  # noqa: E402
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+MATCHED_GEOMETRY_QUALITY_FIELDS = [
+    "psnr_anchor_rotated",
+    "ssim_anchor_rotated",
+    "psnr_corr_anchor_vs_corr_original",
+    "ssim_corr_anchor_vs_corr_original",
+    "psnr_clean_predcorr_vs_roundtrip_pred",
+    "ssim_clean_predcorr_vs_roundtrip_pred",
+    "psnr_oraclecorr_anchor_vs_roundtrip_oracle",
+    "ssim_oraclecorr_anchor_vs_roundtrip_oracle",
+    "psnr_clean_oraclecorr_vs_roundtrip_oracle",
+    "ssim_clean_oraclecorr_vs_roundtrip_oracle",
+    "psnr_clean_canonical",
+    "ssim_clean_canonical",
+]
+LEGACY_POSTATTACK_QUALITY_FIELDS = [
+    "psnr_postattack_clean_to_original",
+    "ssim_postattack_clean_to_original",
+]
+ADDITIONAL_QUALITY_SUMMARY_FIELDS = MATCHED_GEOMETRY_QUALITY_FIELDS + LEGACY_POSTATTACK_QUALITY_FIELDS
 RESULT_FIELDS = [
     "image_id",
     "image_path",
@@ -94,6 +113,9 @@ RESULT_FIELDS = [
     "diff_rot_corr_margin",
     "psnr_anchor",
     "ssim_anchor",
+    *MATCHED_GEOMETRY_QUALITY_FIELDS,
+    *LEGACY_POSTATTACK_QUALITY_FIELDS,
+    # Legacy/post-attack full-image quality; dominated by rotation roundtrip artifacts.
     "psnr_clean",
     "ssim_clean",
     "vae_mse_anchor",
@@ -157,6 +179,11 @@ SUMMARY_FIELDS = [
     "num_inf_psnr_clean",
     "mean_ssim_clean",
     "median_ssim_clean",
+    *[
+        stat_name
+        for field_name in ADDITIONAL_QUALITY_SUMMARY_FIELDS
+        for stat_name in (f"mean_{field_name}", f"median_{field_name}")
+    ],
     "mean_runtime_ms",
 ]
 DIAGNOSTIC_SUMMARY_FIELDS = [
@@ -701,6 +728,14 @@ def evaluate_one(
     )
     corr_shift_deg = float(info.get("corr_shift_deg", float("nan")))
     rotation_error_deg = circular_angle_error(rotation_hat_deg, rotation_gt_deg, period=angle_period)
+    x_roundtrip_pred = rotate_with_config(
+        x_rot_original,
+        -float(rotation_hat_deg),
+        args.correction_rotation_backend,
+        args.correction_rotation_interpolation,
+        float(args.correction_rotation_fill),
+    )
+    x_roundtrip_pred = np.clip(x_roundtrip_pred, 0.0, 1.0).astype(np.float32)
     x_corr = rotate_with_config(
         x_att,
         -rotation_hat_deg,
@@ -742,6 +777,8 @@ def evaluate_one(
     runtime_ms = (time.perf_counter() - start) * 1000.0
 
     ambiguity_resolved, cand0, cand180 = ambiguity_fields(info)
+    psnr_postattack_clean_to_original = psnr(img, x_clean)
+    ssim_postattack_clean_to_original = simple_ssim(img, x_clean)
     row: dict[str, Any] = {
         "image_id": image_id,
         "image_path": str(image_path),
@@ -797,8 +834,22 @@ def evaluate_one(
         "diff_rot_corr_margin": diff_rot_info["diff_corr_margin"],
         "psnr_anchor": psnr(img, x_anchor),
         "ssim_anchor": simple_ssim(img, x_anchor),
-        "psnr_clean": psnr(img, x_clean),
-        "ssim_clean": simple_ssim(img, x_clean),
+        "psnr_anchor_rotated": psnr(x_rot_original, x_att),
+        "ssim_anchor_rotated": simple_ssim(x_rot_original, x_att),
+        "psnr_corr_anchor_vs_corr_original": psnr(x_roundtrip_pred, x_corr),
+        "ssim_corr_anchor_vs_corr_original": simple_ssim(x_roundtrip_pred, x_corr),
+        "psnr_clean_predcorr_vs_roundtrip_pred": psnr(x_roundtrip_pred, x_clean),
+        "ssim_clean_predcorr_vs_roundtrip_pred": simple_ssim(x_roundtrip_pred, x_clean),
+        "psnr_oraclecorr_anchor_vs_roundtrip_oracle": psnr(x_roundtrip_oracle, x_oracle_corr),
+        "ssim_oraclecorr_anchor_vs_roundtrip_oracle": simple_ssim(x_roundtrip_oracle, x_oracle_corr),
+        "psnr_clean_oraclecorr_vs_roundtrip_oracle": psnr(x_roundtrip_oracle, x_clean_oracle),
+        "ssim_clean_oraclecorr_vs_roundtrip_oracle": simple_ssim(x_roundtrip_oracle, x_clean_oracle),
+        "psnr_clean_canonical": psnr(img, x_clean_canonical),
+        "ssim_clean_canonical": simple_ssim(img, x_clean_canonical),
+        "psnr_postattack_clean_to_original": psnr_postattack_clean_to_original,
+        "ssim_postattack_clean_to_original": ssim_postattack_clean_to_original,
+        "psnr_clean": psnr_postattack_clean_to_original,
+        "ssim_clean": ssim_postattack_clean_to_original,
         **vae_metrics,
         "runtime_ms": runtime_ms,
     }
@@ -806,6 +857,7 @@ def evaluate_one(
         "x": img,
         "x_anchor": x_anchor,
         "x_att": np.clip(x_att, 0.0, 1.0).astype(np.float32),
+        "x_roundtrip_pred": x_roundtrip_pred,
         "x_corr": x_corr,
         "x_clean": x_clean,
         "x_minus": x_minus,
@@ -863,37 +915,47 @@ def summarize(rows: list[dict[str, Any]], method: str = "unknown") -> list[dict[
         psnr_clean_finite_mean, psnr_clean_median, psnr_clean_num_inf = finite_stats(psnr_clean)
         ssim_anchor = arr("ssim_anchor")
         ssim_clean = arr("ssim_clean")
-        summary.append(
-            {
-                "method": method,
-                "alpha": alpha,
-                "attack_rotation_backend": group[0].get("attack_rotation_backend", "unknown"),
-                "attack_rotation_interpolation": group[0].get("attack_rotation_interpolation", "unknown"),
-                "attack_rotation_fill": float(group[0].get("attack_rotation_fill", float("nan"))),
-                "correction_rotation_backend": group[0].get("correction_rotation_backend", "unknown"),
-                "correction_rotation_interpolation": group[0].get("correction_rotation_interpolation", "unknown"),
-                "correction_rotation_fill": float(group[0].get("correction_rotation_fill", float("nan"))),
-                "num_samples": len(group),
-                "mean_rotation_error_deg": float(np.nanmean(rotation_error)),
-                "median_rotation_error_deg": float(np.nanmedian(rotation_error)),
-                "max_rotation_error_deg": float(np.nanmax(rotation_error)),
-                "failure_rate_rotation_error_gt_1deg": float(np.nanmean(rotation_error > 1.0)),
-                "failure_rate_rotation_error_gt_3deg": float(np.nanmean(rotation_error > 3.0)),
-                "mean_psnr_anchor": float(np.nanmean(psnr_anchor)),
-                "mean_psnr_anchor_finite": psnr_anchor_finite_mean,
-                "median_psnr_anchor": psnr_anchor_median,
-                "num_inf_psnr_anchor": psnr_anchor_num_inf,
-                "mean_ssim_anchor": float(np.nanmean(ssim_anchor)),
-                "median_ssim_anchor": float(np.nanmedian(ssim_anchor)),
-                "mean_psnr_clean": float(np.nanmean(psnr_clean)),
-                "mean_psnr_clean_finite": psnr_clean_finite_mean,
-                "median_psnr_clean": psnr_clean_median,
-                "num_inf_psnr_clean": psnr_clean_num_inf,
-                "mean_ssim_clean": float(np.nanmean(ssim_clean)),
-                "median_ssim_clean": float(np.nanmedian(ssim_clean)),
-                "mean_runtime_ms": float(np.nanmean(arr("runtime_ms"))),
-            }
-        )
+        summary_row = {
+            "method": method,
+            "alpha": alpha,
+            "attack_rotation_backend": group[0].get("attack_rotation_backend", "unknown"),
+            "attack_rotation_interpolation": group[0].get("attack_rotation_interpolation", "unknown"),
+            "attack_rotation_fill": float(group[0].get("attack_rotation_fill", float("nan"))),
+            "correction_rotation_backend": group[0].get("correction_rotation_backend", "unknown"),
+            "correction_rotation_interpolation": group[0].get("correction_rotation_interpolation", "unknown"),
+            "correction_rotation_fill": float(group[0].get("correction_rotation_fill", float("nan"))),
+            "num_samples": len(group),
+            "mean_rotation_error_deg": float(np.nanmean(rotation_error)),
+            "median_rotation_error_deg": float(np.nanmedian(rotation_error)),
+            "max_rotation_error_deg": float(np.nanmax(rotation_error)),
+            "failure_rate_rotation_error_gt_1deg": float(np.nanmean(rotation_error > 1.0)),
+            "failure_rate_rotation_error_gt_3deg": float(np.nanmean(rotation_error > 3.0)),
+            "mean_psnr_anchor": float(np.nanmean(psnr_anchor)),
+            "mean_psnr_anchor_finite": psnr_anchor_finite_mean,
+            "median_psnr_anchor": psnr_anchor_median,
+            "num_inf_psnr_anchor": psnr_anchor_num_inf,
+            "mean_ssim_anchor": float(np.nanmean(ssim_anchor)),
+            "median_ssim_anchor": float(np.nanmedian(ssim_anchor)),
+            "mean_psnr_clean": float(np.nanmean(psnr_clean)),
+            "mean_psnr_clean_finite": psnr_clean_finite_mean,
+            "median_psnr_clean": psnr_clean_median,
+            "num_inf_psnr_clean": psnr_clean_num_inf,
+            "mean_ssim_clean": float(np.nanmean(ssim_clean)),
+            "median_ssim_clean": float(np.nanmedian(ssim_clean)),
+            "mean_runtime_ms": float(np.nanmean(arr("runtime_ms"))),
+        }
+        for field_name in ADDITIONAL_QUALITY_SUMMARY_FIELDS:
+            values = np.asarray(
+                [float(row.get(field_name, float("nan"))) for row in group],
+                dtype=np.float64,
+            )
+            if np.all(np.isnan(values)):
+                summary_row[f"mean_{field_name}"] = float("nan")
+                summary_row[f"median_{field_name}"] = float("nan")
+            else:
+                summary_row[f"mean_{field_name}"] = float(np.nanmean(values))
+                summary_row[f"median_{field_name}"] = float(np.nanmedian(values))
+        summary.append(summary_row)
     return summary
 
 
