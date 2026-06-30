@@ -1,3 +1,6 @@
+__pycache__/
+*.pyc
+
 # RotBind debug archives: keep summaries, ignore heavy/intermediate artifacts.
 experiments/archive_debug/**
 !experiments/archive_debug/

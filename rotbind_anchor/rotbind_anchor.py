@@ -110,6 +110,13 @@ def shift_to_attack_angle(theta_shift: float, angle_period: float = 180.0) -> fl
     return float((-float(theta_shift)) % float(angle_period))
 
 
+def wrap_angle_signed(theta: float, period: float = 180.0) -> float:
+    """Convert an angle in [0, period) to [-period/2, period/2)."""
+    if period <= 0:
+        raise ValueError("period must be positive")
+    return float((float(theta) + period / 2.0) % period - period / 2.0)
+
+
 def rotate_image_keep_size(img: np.ndarray, angle: float, mode: str = "reflect") -> np.ndarray:
     """Rotate a 2D or RGB image with scipy.ndimage.rotate while preserving shape."""
     arr = _as_float32_array(img, "img")
@@ -426,12 +433,17 @@ def extract_metadata_ring_difference_signature(
     return signature, {"pos_r_indices": pos_idx, "neg_r_indices": neg_idx}
 
 
-def circular_correlation_angle(
+def circular_correlation_shift(
     signature: np.ndarray,
     angular_code: np.ndarray,
     angle_period: float = 180.0,
 ) -> tuple[float, float, np.ndarray, dict[str, Any]]:
-    """Estimate angular shift with FFT-based circular correlation."""
+    """Estimate the Fourier-polar circular-correlation shift.
+
+    The returned corr_shift_deg is an internal correlation peak shift, not the
+    image rotation angle. Convert it with shift_to_attack_angle() before using
+    it as a rotation estimate.
+    """
     sig = normalize_zero_mean_unit_std(signature)
     code = normalize_zero_mean_unit_std(angular_code)
     if sig.ndim != 1 or code.ndim != 1:
@@ -449,16 +461,28 @@ def circular_correlation_angle(
         top2_score = float(np.min(top))
     else:
         top2_score = float("-inf")
-    theta_full = float(best_idx / corr.size * 360.0)
-    theta_mod = float(theta_full % float(angle_period))
+    corr_shift_full_deg = float(best_idx / corr.size * 360.0)
+    corr_shift_deg = float(corr_shift_full_deg % float(angle_period))
     extra_info: dict[str, Any] = {
         "angle_bin": best_idx,
-        "theta_full": theta_full,
+        "corr_shift_full_deg": corr_shift_full_deg,
+        "corr_period_deg": float(angle_period),
         "top2_score": top2_score,
         "corr_margin": float(best_score - top2_score),
         "raw_shift": best_idx,
+        # Deprecated compatibility aliases.
+        "theta_full": corr_shift_full_deg,
     }
-    return theta_mod, best_score, corr.astype(np.float32), extra_info
+    return corr_shift_deg, best_score, corr.astype(np.float32), extra_info
+
+
+def circular_correlation_angle(
+    signature: np.ndarray,
+    angular_code: np.ndarray,
+    angle_period: float = 180.0,
+) -> tuple[float, float, np.ndarray, dict[str, Any]]:
+    """Deprecated alias for circular_correlation_shift()."""
+    return circular_correlation_shift(signature, angular_code, angle_period=angle_period)
 
 
 def _polar_signature_from_metadata(
@@ -503,22 +527,30 @@ def detect_rotbind_angle(
     signature, polar_info = _polar_signature_from_metadata(img_rgb, metadata, rmin, rmax, num_r)
     pi_periodic = bool(metadata.get("pi_periodic", True))
     angle_period = 180.0 if pi_periodic else 360.0
-    theta_mod, best_score, score_curve, corr_info = circular_correlation_angle(
+    corr_shift_deg, best_score, score_curve, corr_info = circular_correlation_shift(
         signature,
         angular_code,
         angle_period=angle_period,
     )
+    rotation_hat_deg = shift_to_attack_angle(corr_shift_deg, angle_period=angle_period)
     extra_info: dict[str, Any] = {
         **corr_info,
-        "theta_mod": theta_mod,
+        "corr_shift_deg": corr_shift_deg,
+        "corr_period_deg": angle_period,
         "angle_period": angle_period,
         "polar_info": polar_info,
+        # Deprecated compatibility aliases.
+        "theta_mod": corr_shift_deg,
     }
-    theta_hat = theta_mod
     if pi_periodic and resolve_ambiguity:
-        theta_hat, ambiguity_info = resolve_180_ambiguity(img_rgb, theta_mod, metadata, num_r=num_r)
+        rotation_hat_deg, ambiguity_info = resolve_180_ambiguity(
+            img_rgb,
+            rotation_hat_deg,
+            metadata,
+            num_r=num_r,
+        )
         extra_info["ambiguity"] = ambiguity_info
-    return float(theta_hat), float(best_score), score_curve.astype(np.float32), extra_info
+    return float(rotation_hat_deg), float(best_score), score_curve.astype(np.float32), extra_info
 
 
 def rotbind_anchor_score(
@@ -531,52 +563,58 @@ def rotbind_anchor_score(
     angular_code = _as_float32_array(metadata["angular_code"], "metadata['angular_code']")
     signature, polar_info = _polar_signature_from_metadata(img_rgb, metadata, num_r=num_r)
     angle_period = 180.0 if bool(metadata.get("pi_periodic", True)) else 360.0
-    theta_mod, best_score, score_curve, corr_info = circular_correlation_angle(
+    corr_shift_deg, best_score, score_curve, corr_info = circular_correlation_shift(
         signature,
         angular_code,
         angle_period=angle_period,
     )
     info: dict[str, Any] = {
         **corr_info,
-        "theta_mod": theta_mod,
+        "corr_shift_deg": corr_shift_deg,
+        "corr_period_deg": angle_period,
         "angle_period": angle_period,
         "score_curve": score_curve,
         "polar_info": polar_info,
+        # Deprecated compatibility alias.
+        "theta_mod": corr_shift_deg,
     }
     return float(best_score), info
 
 
 def resolve_180_ambiguity(
     img_rgb: np.ndarray,
-    theta_mod: float,
+    rotation_hat_deg: float,
     metadata: dict[str, Any],
     num_r: int = 64,
     rotate_mode: str = "reflect",
 ) -> tuple[float, dict[str, Any]]:
     """Resolve pi-periodic ambiguity by scoring two corrected candidates."""
     img = _check_rgb_image(img_rgb)
-    theta1 = float(theta_mod)
-    theta2 = theta1 + 180.0
-    img1 = rotate_image_keep_size(img, -theta1, mode=rotate_mode)
-    img2 = rotate_image_keep_size(img, -theta2, mode=rotate_mode)
+    rotation1 = float(rotation_hat_deg)
+    rotation2 = rotation1 + 180.0
+    img1 = rotate_image_keep_size(img, -rotation1, mode=rotate_mode)
+    img2 = rotate_image_keep_size(img, -rotation2, mode=rotate_mode)
     score1, info1 = rotbind_anchor_score(np.clip(img1, 0.0, 1.0).astype(np.float32), metadata, num_r=num_r)
     score2, info2 = rotbind_anchor_score(np.clip(img2, 0.0, 1.0).astype(np.float32), metadata, num_r=num_r)
     if score1 >= score2:
-        theta = theta1
+        rotation = rotation1
         chosen = 1
     else:
-        theta = theta2
+        rotation = rotation2
         chosen = 2
     info: dict[str, Any] = {
-        "theta1": theta1,
-        "theta2": theta2,
+        "rotation1_deg": rotation1,
+        "rotation2_deg": rotation2,
         "score1": float(score1),
         "score2": float(score2),
         "chosen": chosen,
         "candidate1_info": info1,
         "candidate2_info": info2,
+        # Deprecated compatibility aliases.
+        "theta1": rotation1,
+        "theta2": rotation2,
     }
-    return float(theta), info
+    return float(rotation), info
 
 
 def remove_rotbind_anchor_rgb(
@@ -630,8 +668,8 @@ def _smoke_test() -> None:
     mask, metadata = make_ring_pair_mask(64, 64, key=0, num_angles=180)
     anchored = embed_rotbind_anchor_rgb(img, mask, alpha=0.02)
     rotated = rotate_image_keep_size(anchored, 45.0)
-    theta_hat, _, _, _ = detect_rotbind_angle(rotated, metadata, num_r=32)
-    corrected = rotate_image_keep_size(rotated, -theta_hat)
+    rotation_hat_deg, _, _, _ = detect_rotbind_angle(rotated, metadata, num_r=32)
+    corrected = rotate_image_keep_size(rotated, -rotation_hat_deg)
     removed = remove_rotbind_anchor_rgb(np.clip(corrected, 0.0, 1.0), mask, alpha=0.02)
     negative = make_negative_anchor_rgb(np.clip(corrected, 0.0, 1.0), mask, alpha=0.02)
     assert anchored.shape == rotated.shape == removed.shape == negative.shape == img.shape

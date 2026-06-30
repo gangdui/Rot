@@ -16,7 +16,7 @@ if __package__ is None or __package__ == "":
 
 from rotbind_anchor.rotbind_anchor import (  # noqa: E402
     circular_angle_error,
-    circular_correlation_angle,
+    circular_correlation_shift,
     detect_rotbind_angle,
     embed_rotbind_anchor_rgb,
     extract_metadata_ring_difference_signature,
@@ -26,6 +26,7 @@ from rotbind_anchor.rotbind_anchor import (  # noqa: E402
     rgb_to_ycbcr,
     rotate_image_keep_size,
     shift_to_attack_angle,
+    wrap_angle_signed,
 )
 
 
@@ -147,7 +148,11 @@ def add_ring_overlays(ax: Any, shape: tuple[int, int], metadata: dict[str, Any])
     ax.legend(handles=handles, loc="lower right", fontsize=7, framealpha=0.85)
 
 
-def compute_signature_and_corr(img: np.ndarray, metadata: dict[str, Any]) -> dict[str, Any]:
+def compute_signature_and_corr(
+    img: np.ndarray,
+    metadata: dict[str, Any],
+    rotation_gt_deg: float | None = None,
+) -> dict[str, Any]:
     """Compute ring-difference signature and circular correlation."""
     all_bands = metadata["pos_bands"] + metadata["neg_bands"]
     rmin = min(float(b[0]) for b in all_bands)
@@ -162,20 +167,32 @@ def compute_signature_and_corr(img: np.ndarray, metadata: dict[str, Any]) -> dic
     )
     signature, _ = extract_metadata_ring_difference_signature(polar, info["r_values"], metadata)
     angle_period = 180.0 if metadata.get("pi_periodic", True) else 360.0
-    theta_shift, score, corr, corr_info = circular_correlation_angle(
+    corr_shift_deg, score, corr, corr_info = circular_correlation_shift(
         signature,
         metadata["angular_code"],
         angle_period=angle_period,
     )
-    theta_attack_hat = shift_to_attack_angle(theta_shift, angle_period)
+    rotation_hat_deg = shift_to_attack_angle(corr_shift_deg, angle_period)
+    rotation_error_deg = (
+        circular_angle_error(rotation_hat_deg, rotation_gt_deg, period=angle_period)
+        if rotation_gt_deg is not None
+        else float("nan")
+    )
     return {
         "signature": signature,
         "angle_period": angle_period,
-        "theta_shift": theta_shift,
-        "theta_attack_hat": theta_attack_hat,
+        "corr_shift_deg": corr_shift_deg,
+        "corr_shift_display_deg": wrap_angle_signed(corr_shift_deg, period=angle_period),
+        "rotation_hat_deg": rotation_hat_deg,
+        "rotation_hat_display_deg": wrap_angle_signed(rotation_hat_deg, period=angle_period),
+        "rotation_gt_deg": float(rotation_gt_deg) if rotation_gt_deg is not None else float("nan"),
+        "rotation_error_deg": rotation_error_deg,
         "score": score,
         "corr": corr,
         "corr_info": corr_info,
+        # Deprecated compatibility aliases.
+        "theta_shift": corr_shift_deg,
+        "theta_attack_hat": rotation_hat_deg,
     }
 
 
@@ -194,29 +211,37 @@ def build_diagnostics(img: np.ndarray, alpha: float, method: str, key: int, thet
     attack: dict[str, Any] | None = None
     if abs(float(theta)) > 1e-12:
         x_att = rotate_image_keep_size(anchored, float(theta))
-        theta_shift, score, corr, info = detect_rotbind_angle(
+        rotation_hat_deg, score, corr, info = detect_rotbind_angle(
             np.clip(x_att, 0.0, 1.0).astype(np.float32),
             metadata,
             num_r=64,
             resolve_ambiguity=False,
         )
         angle_period = 180.0 if metadata.get("pi_periodic", True) else 360.0
-        theta_hat = shift_to_attack_angle(theta_shift, angle_period)
-        x_corr = rotate_image_keep_size(x_att, -theta_hat)
+        corr_shift_deg = float(info.get("corr_shift_deg", float("nan")))
+        rotation_error_deg = circular_angle_error(rotation_hat_deg, theta, period=angle_period)
+        x_corr = rotate_image_keep_size(x_att, -rotation_hat_deg)
         x_corr = np.clip(x_corr, 0.0, 1.0).astype(np.float32)
         x_clean = remove_rotbind_anchor_rgb(x_corr, mask, alpha)
         attack = {
             "x_att": np.clip(x_att, 0.0, 1.0).astype(np.float32),
             "x_corr": x_corr,
             "x_clean": x_clean,
-            "theta_shift": theta_shift,
-            "theta_attack_hat": theta_hat,
-            "theta_hat": theta_hat,
-            "angle_error": circular_angle_error(theta_hat, theta, period=angle_period),
+            "corr_shift_deg": corr_shift_deg,
+            "corr_shift_display_deg": wrap_angle_signed(corr_shift_deg, period=angle_period),
+            "rotation_gt_deg": float(theta),
+            "rotation_hat_deg": rotation_hat_deg,
+            "rotation_hat_display_deg": wrap_angle_signed(rotation_hat_deg, period=angle_period),
+            "rotation_error_deg": rotation_error_deg,
             "score": score,
             "corr": corr,
             "corr_info": info,
             "angle_period": angle_period,
+            # Deprecated compatibility aliases.
+            "theta_shift": corr_shift_deg,
+            "theta_attack_hat": rotation_hat_deg,
+            "theta_hat": rotation_hat_deg,
+            "angle_error": rotation_error_deg,
         }
 
     return {
@@ -310,24 +335,32 @@ def plot_signature_vs_key(ax: Any, diagnostics: dict[str, Any]) -> None:
 
 
 def plot_correlation_curve(ax: Any, corr_info: dict[str, Any], title_prefix: str) -> None:
-    """Plot circular correlation curve with peak and converted attack angle."""
+    """Plot circular correlation curve with image-rotation semantics."""
     corr = np.asarray(corr_info["corr"], dtype=np.float32)
     angle_period = float(corr_info["angle_period"])
     xs = np.arange(len(corr), dtype=np.float32) / len(corr) * 360.0
-    theta_shift = float(corr_info["theta_shift"])
-    theta_attack_hat = float(corr_info["theta_attack_hat"])
+    corr_shift_deg = float(corr_info["corr_shift_deg"])
+    rotation_hat_deg = float(corr_info["rotation_hat_deg"])
+    rotation_gt_deg = float(corr_info.get("rotation_gt_deg", np.nan))
+    rotation_error_deg = float(corr_info.get("rotation_error_deg", np.nan))
     best_idx = int(corr_info["corr_info"].get("angle_bin", int(np.argmax(corr))))
-    theta_full = float(corr_info["corr_info"].get("theta_full", best_idx / len(corr) * 360.0))
+    corr_shift_full_deg = float(
+        corr_info["corr_info"].get("corr_shift_full_deg", corr_info["corr_info"].get("theta_full", best_idx / len(corr) * 360.0))
+    )
     margin = float(corr_info["corr_info"].get("corr_margin", np.nan))
     ax.plot(xs, corr, color="black", linewidth=1.2)
-    ax.axvline(theta_full, color="red", linewidth=1.5, label=f"theta_shift = {theta_shift:.1f} deg")
-    ax.scatter([theta_full], [corr[best_idx]], color="red", s=24)
+    ax.axvline(corr_shift_full_deg, color="red", linewidth=1.5, label=f"corr shift = {corr_shift_deg:.1f} deg")
+    ax.scatter([corr_shift_full_deg], [corr[best_idx]], color="red", s=24)
+    gt_line = f"GT rotation: {rotation_gt_deg:.1f} deg\n" if np.isfinite(rotation_gt_deg) else ""
+    err_line = f"Error: {rotation_error_deg:.1f} deg\n" if np.isfinite(rotation_error_deg) else ""
     ax.text(
         0.02,
         0.96,
-        f"best peak = {theta_full:.1f} deg\n"
-        f"theta_shift = {theta_shift:.1f} deg\n"
-        f"attack angle estimate = {theta_attack_hat:.1f} deg\n"
+        f"{gt_line}"
+        f"Estimated rotation: {rotation_hat_deg:.1f} deg\n"
+        f"{err_line}"
+        f"Debug corr shift: {corr_shift_deg:.1f} deg\n"
+        f"best peak = {corr_shift_full_deg:.1f} deg\n"
         f"corr_margin = {margin:.3g}",
         transform=ax.transAxes,
         va="top",
@@ -339,7 +372,7 @@ def plot_correlation_curve(ax: Any, corr_info: dict[str, Any], title_prefix: str
     if angle_period == 180.0:
         suffix += "; 0/180 ambiguity"
     ax.set_title(f"{title_prefix}\n{suffix}", fontsize=10)
-    ax.set_xlabel("degree shift")
+    ax.set_xlabel("correlation shift (deg), not image rotation")
     ax.set_ylabel("correlation")
     ax.set_xlim(0.0, 360.0)
     ax.grid(True, alpha=0.3)
@@ -418,7 +451,10 @@ def save_grid(outdir: Path, img: np.ndarray, diagnostics: dict[str, Any], alpha:
             [
                 ("attacked_rgb", "image", attack["x_att"]),
                 (
-                    f"corrected_rgb\ntheta_gt={theta:.1f}, theta_hat={attack['theta_hat']:.1f}, error={attack['angle_error']:.1f}",
+                    "corrected_rgb\n"
+                    f"GT rotation = {theta:.1f} deg\n"
+                    f"Estimated rotation = {attack['rotation_hat_deg']:.1f} deg\n"
+                    f"Error = {attack['rotation_error_deg']:.1f} deg",
                     "image",
                     attack["x_corr"],
                 ),
@@ -497,13 +533,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"wrote {outdir / 'diagnostic_grid.png'}")
     if attack is None:
         print(
-            f"theta_shift={diagnostics['theta_shift']:.6f}, "
-            f"theta_attack_hat={diagnostics['theta_attack_hat']:.6f}, score={diagnostics['score']:.6f}"
+            f"corr_shift_deg={diagnostics['corr_shift_deg']:.6f}, "
+            f"rotation_hat_deg={diagnostics['rotation_hat_deg']:.6f}, score={diagnostics['score']:.6f}"
         )
     else:
         print(
-            f"theta_gt={theta:.6f}, theta_shift={attack['theta_shift']:.6f}, "
-            f"theta_hat={attack['theta_hat']:.6f}, angle_error={attack['angle_error']:.6f}"
+            f"rotation_gt_deg={theta:.6f}, corr_shift_deg={attack['corr_shift_deg']:.6f}, "
+            f"rotation_hat_deg={attack['rotation_hat_deg']:.6f}, "
+            f"rotation_error_deg={attack['rotation_error_deg']:.6f}"
         )
     return 0
 

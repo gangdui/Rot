@@ -23,7 +23,7 @@ if __package__ is None or __package__ == "":
 
 from rotbind_anchor.rotbind_anchor import (  # noqa: E402
     circular_angle_error,
-    circular_correlation_angle,
+    circular_correlation_shift,
     detect_rotbind_angle,
     embed_rotbind_anchor_rgb,
     extract_metadata_ring_difference_signature,
@@ -33,6 +33,7 @@ from rotbind_anchor.rotbind_anchor import (  # noqa: E402
     remove_rotbind_anchor_rgb,
     rotate_image_keep_size,
     shift_to_attack_angle,
+    wrap_angle_signed,
 )
 
 
@@ -41,6 +42,21 @@ RESULT_FIELDS = [
     "image_id",
     "image_path",
     "alpha",
+    "rotation_gt_deg",
+    "rotation_gt_mod180_deg",
+    "rotation_hat_deg",
+    "rotation_hat_display_deg",
+    "rotation_error_deg",
+    "corr_shift_deg",
+    "corr_shift_display_deg",
+    "corr_period_deg",
+    "best_score",
+    "top2_score",
+    "corr_margin",
+    "ambiguity_resolved",
+    "candidate_score_0",
+    "candidate_score_180",
+    # Legacy angle fields kept temporarily for old analysis scripts.
     "theta_gt",
     "raw_theta_shift",
     "theta_attack_hat",
@@ -49,12 +65,6 @@ RESULT_FIELDS = [
     "angle_sign",
     "angle_error",
     "angle_error_mod180",
-    "best_score",
-    "top2_score",
-    "corr_margin",
-    "ambiguity_resolved",
-    "candidate_score_0",
-    "candidate_score_180",
     "diff_theta_hat",
     "diff_angle_error",
     "diff_best_score",
@@ -97,13 +107,11 @@ SUMMARY_FIELDS = [
     "method",
     "alpha",
     "num_samples",
-    "mean_angle_error",
-    "median_angle_error",
-    "max_angle_error",
-    "failure_rate_error_gt_1deg",
-    "failure_rate_error_gt_3deg",
-    "mean_angle_error_mod180",
-    "failure_rate_mod180_error_gt_3deg",
+    "mean_rotation_error_deg",
+    "median_rotation_error_deg",
+    "max_rotation_error_deg",
+    "failure_rate_rotation_error_gt_1deg",
+    "failure_rate_rotation_error_gt_3deg",
     "mean_psnr_anchor",
     "mean_psnr_anchor_finite",
     "median_psnr_anchor",
@@ -117,7 +125,6 @@ SUMMARY_FIELDS = [
     "mean_ssim_clean",
     "median_ssim_clean",
     "mean_runtime_ms",
-    "selected_angle_sign",
 ]
 DIAGNOSTIC_SUMMARY_FIELDS = [
     "diagnostic_alpha",
@@ -128,7 +135,6 @@ DIAGNOSTIC_SUMMARY_FIELDS = [
     "failure_rate_diff_error_gt_3deg",
     "mean_diff_best_score",
     "mean_diff_corr_margin",
-    "selected_angle_sign",
 ]
 
 
@@ -393,7 +399,7 @@ def normalize_angle(theta: float) -> float:
 
 
 def apply_angle_sign(theta_shift: float, angle_sign: str, angle_period: float = 180.0) -> float:
-    """Convert a correlation shift into an attack angle using a sign convention."""
+    """Deprecated: convert a correlation shift into an image rotation angle."""
     if angle_sign == "raw":
         return shift_to_attack_angle(theta_shift, angle_period=angle_period)
     if angle_sign == "neg":
@@ -435,47 +441,8 @@ def make_synthetic_images(size: int) -> list[np.ndarray]:
 
 
 def calibrate_angle_sign(args: argparse.Namespace) -> tuple[str, dict[str, float]]:
-    """Select raw or neg sign using synthetic embed-rotate-detect calibration."""
-    calib_size = min(int(args.size), 128)
-    images = make_synthetic_images(calib_size)
-    angles = list(args.angles)
-    alpha = float(args.example_alpha if args.example_alpha in args.alphas else args.alphas[0])
-    raw_errors: list[float] = []
-    neg_errors: list[float] = []
-
-    for img in images:
-        H, W = img.shape[:2]
-        modulation_grid, metadata = make_ring_pair_mask(
-            H,
-            W,
-            num_angles=int(args.num_angles),
-            key=int(args.key),
-            method=args.method,
-            num_ring_pairs=int(args.num_ring_pairs),
-        )
-        x_anchor = embed_rotbind_anchor_rgb(img, modulation_grid, alpha)
-        for theta_gt in angles:
-            x_att = rotate_image_keep_size(x_anchor, theta_gt)
-            angle_period = 180.0 if bool(metadata.get("pi_periodic", True)) else 360.0
-            theta_shift, _, _, _ = detect_rotbind_angle(
-                x_att,
-                metadata,
-                num_r=int(args.num_r),
-                resolve_ambiguity=False,
-            )
-            raw_theta = apply_angle_sign(theta_shift, "raw", angle_period=angle_period)
-            neg_theta = apply_angle_sign(theta_shift, "neg", angle_period=angle_period)
-            raw_errors.append(circular_angle_error(raw_theta, theta_gt, period=angle_period))
-            neg_errors.append(circular_angle_error(neg_theta, theta_gt, period=angle_period))
-
-    raw_mean = float(np.mean(raw_errors)) if raw_errors else float("nan")
-    neg_mean = float(np.mean(neg_errors)) if neg_errors else float("nan")
-    selected = "raw" if raw_mean <= neg_mean else "neg"
-    print("[Angle sign calibration]")
-    print(f"raw mean error = {raw_mean:.6f}")
-    print(f"neg mean error = {neg_mean:.6f}")
-    print(f"selected sign = {selected}")
-    return selected, {"raw_mean_error": raw_mean, "neg_mean_error": neg_mean}
+    """Deprecated compatibility stub; RotBind now always uses raw convention."""
+    return "raw", {"raw_mean_error": float("nan"), "neg_mean_error": float("nan")}
 
 
 def ambiguity_fields(info: dict[str, Any]) -> tuple[bool, float, float]:
@@ -491,7 +458,6 @@ def diagnostic_diff_feature(
     x_anchor: np.ndarray,
     metadata: dict[str, Any],
     num_r: int,
-    angle_sign: str,
     expected_theta: float = 0.0,
 ) -> dict[str, float]:
     """Correlate PolarFeature(x_anchor)-PolarFeature(x) against the angular code."""
@@ -519,19 +485,22 @@ def diagnostic_diff_feature(
     diff_feature = polar_anchor - polar_original
     signature, _ = extract_metadata_ring_difference_signature(diff_feature, info["r_values"], metadata)
     angle_period = 180.0 if bool(metadata.get("pi_periodic", True)) else 360.0
-    theta_shift, best_score, _, corr_info = circular_correlation_angle(
+    corr_shift_deg, best_score, _, corr_info = circular_correlation_shift(
         signature,
         metadata["angular_code"],
         angle_period=angle_period,
     )
-    theta_attack_hat = apply_angle_sign(theta_shift, angle_sign, angle_period=angle_period)
-    theta_attack_error = circular_angle_error(theta_attack_hat, expected_theta, period=angle_period)
+    rotation_hat_deg = shift_to_attack_angle(corr_shift_deg, angle_period=angle_period)
+    rotation_error_deg = circular_angle_error(rotation_hat_deg, expected_theta, period=angle_period)
     return {
-        "diff_theta_shift": float(theta_shift),
-        "diff_attack_hat": float(theta_attack_hat),
-        "diff_attack_error": theta_attack_error,
-        "diff_theta_hat": float(theta_attack_hat),
-        "diff_angle_error": theta_attack_error,
+        "diff_corr_shift_deg": float(corr_shift_deg),
+        "diff_rotation_hat_deg": float(rotation_hat_deg),
+        "diff_rotation_error_deg": rotation_error_deg,
+        "diff_theta_shift": float(corr_shift_deg),
+        "diff_attack_hat": float(rotation_hat_deg),
+        "diff_attack_error": rotation_error_deg,
+        "diff_theta_hat": float(rotation_hat_deg),
+        "diff_angle_error": rotation_error_deg,
         "diff_best_score": float(best_score),
         "diff_corr_margin": float(corr_info.get("corr_margin", float("nan"))),
     }
@@ -542,8 +511,7 @@ def evaluate_one(
     image_id: str,
     image_path: Path,
     alpha: float,
-    theta_gt: float,
-    angle_sign: str,
+    rotation_gt_deg: float,
     args: argparse.Namespace,
     modulation_grid: np.ndarray,
     metadata: dict[str, Any],
@@ -554,32 +522,32 @@ def evaluate_one(
     x_anchor = embed_rotbind_anchor_rgb(img, modulation_grid, alpha)
     x_clean_canonical = remove_rotbind_anchor_rgb(x_anchor, modulation_grid, alpha)
     x_minus_canonical = make_negative_anchor_rgb(x_anchor, modulation_grid, alpha)
-    diff_info = diagnostic_diff_feature(img, x_anchor, metadata, int(args.num_r), angle_sign)
-    x_att = rotate_image_keep_size(x_anchor, theta_gt)
-    x_rot_original = rotate_image_keep_size(img, theta_gt)
-    x_roundtrip_oracle = rotate_image_keep_size(x_rot_original, -float(theta_gt))
+    diff_info = diagnostic_diff_feature(img, x_anchor, metadata, int(args.num_r))
+    x_att = rotate_image_keep_size(x_anchor, rotation_gt_deg)
+    x_rot_original = rotate_image_keep_size(img, rotation_gt_deg)
+    x_roundtrip_oracle = rotate_image_keep_size(x_rot_original, -float(rotation_gt_deg))
     x_roundtrip_oracle = np.clip(x_roundtrip_oracle, 0.0, 1.0).astype(np.float32)
     diff_rot_info = diagnostic_diff_feature(
         np.clip(x_rot_original, 0.0, 1.0).astype(np.float32),
         np.clip(x_att, 0.0, 1.0).astype(np.float32),
         metadata,
         int(args.num_r),
-        angle_sign,
-        expected_theta=float(theta_gt),
+        expected_theta=float(rotation_gt_deg),
     )
     angle_period = 180.0 if bool(metadata.get("pi_periodic", True)) else 360.0
-    raw_theta_shift, best_score, score_curve, info = detect_rotbind_angle(
+    rotation_hat_deg, best_score, score_curve, info = detect_rotbind_angle(
         np.clip(x_att, 0.0, 1.0).astype(np.float32),
         metadata,
         num_r=int(args.num_r),
         resolve_ambiguity=False,
     )
-    theta_attack_hat = apply_angle_sign(raw_theta_shift, angle_sign, angle_period=angle_period)
-    x_corr = rotate_image_keep_size(x_att, -theta_attack_hat)
+    corr_shift_deg = float(info.get("corr_shift_deg", float("nan")))
+    rotation_error_deg = circular_angle_error(rotation_hat_deg, rotation_gt_deg, period=angle_period)
+    x_corr = rotate_image_keep_size(x_att, -rotation_hat_deg)
     x_corr = np.clip(x_corr, 0.0, 1.0).astype(np.float32)
     x_clean = remove_rotbind_anchor_rgb(x_corr, modulation_grid, alpha)
     x_minus = make_negative_anchor_rgb(x_corr, modulation_grid, alpha)
-    x_oracle_corr = rotate_image_keep_size(x_att, -float(theta_gt))
+    x_oracle_corr = rotate_image_keep_size(x_att, -float(rotation_gt_deg))
     x_oracle_corr = np.clip(x_oracle_corr, 0.0, 1.0).astype(np.float32)
     x_clean_oracle = remove_rotbind_anchor_rgb(x_oracle_corr, modulation_grid, alpha)
     x_minus_oracle = make_negative_anchor_rgb(x_oracle_corr, modulation_grid, alpha)
@@ -608,20 +576,29 @@ def evaluate_one(
         "image_id": image_id,
         "image_path": str(image_path),
         "alpha": float(alpha),
-        "theta_gt": float(theta_gt),
-        "raw_theta_shift": float(raw_theta_shift),
-        "theta_attack_hat": float(theta_attack_hat),
-        "theta_hat_raw": float(raw_theta_shift),
-        "theta_hat": float(theta_attack_hat),
-        "angle_sign": angle_sign,
-        "angle_error": circular_angle_error(theta_attack_hat, theta_gt, period=angle_period),
-        "angle_error_mod180": circular_angle_error(theta_attack_hat, theta_gt, period=180.0),
+        "rotation_gt_deg": float(rotation_gt_deg),
+        "rotation_gt_mod180_deg": float(rotation_gt_deg % 180.0),
+        "rotation_hat_deg": float(rotation_hat_deg),
+        "rotation_hat_display_deg": wrap_angle_signed(rotation_hat_deg, period=angle_period),
+        "rotation_error_deg": rotation_error_deg,
+        "corr_shift_deg": corr_shift_deg,
+        "corr_shift_display_deg": wrap_angle_signed(corr_shift_deg, period=angle_period),
+        "corr_period_deg": float(info.get("corr_period_deg", angle_period)),
         "best_score": float(best_score),
         "top2_score": float(info.get("top2_score", float("nan"))),
         "corr_margin": float(info.get("corr_margin", float("nan"))),
         "ambiguity_resolved": ambiguity_resolved,
         "candidate_score_0": cand0,
         "candidate_score_180": cand180,
+        # Legacy angle fields kept temporarily for old analysis scripts.
+        "theta_gt": float(rotation_gt_deg),
+        "raw_theta_shift": corr_shift_deg,
+        "theta_attack_hat": float(rotation_hat_deg),
+        "theta_hat_raw": corr_shift_deg,
+        "theta_hat": float(rotation_hat_deg),
+        "angle_sign": "raw",
+        "angle_error": rotation_error_deg,
+        "angle_error_mod180": circular_angle_error(rotation_hat_deg, rotation_gt_deg, period=180.0),
         "diff_theta_hat": diff_info["diff_theta_hat"],
         "diff_angle_error": diff_info["diff_angle_error"],
         "diff_best_score": diff_info["diff_best_score"],
@@ -648,8 +625,13 @@ def evaluate_one(
         "x_clean": x_clean,
         "x_minus": x_minus,
         "score_curve": score_curve,
-        "theta_gt": theta_gt,
-        "theta_hat": theta_attack_hat,
+        "rotation_gt_deg": rotation_gt_deg,
+        "rotation_hat_deg": rotation_hat_deg,
+        "rotation_error_deg": rotation_error_deg,
+        "corr_shift_deg": corr_shift_deg,
+        # Legacy aliases.
+        "theta_gt": rotation_gt_deg,
+        "theta_hat": rotation_hat_deg,
         "alpha": alpha,
     }
     return row, artifacts
@@ -673,7 +655,7 @@ def finite_stats(values: np.ndarray) -> tuple[float, float, int]:
     return float(np.nanmean(finite)), float(np.nanmedian(finite)), num_inf
 
 
-def summarize(rows: list[dict[str, Any]], selected_angle_sign: str, method: str = "unknown") -> list[dict[str, Any]]:
+def summarize(rows: list[dict[str, Any]], method: str = "unknown") -> list[dict[str, Any]]:
     """Aggregate result rows by alpha."""
     summary = []
     alphas = sorted({float(row["alpha"]) for row in rows})
@@ -683,8 +665,7 @@ def summarize(rows: list[dict[str, Any]], selected_angle_sign: str, method: str 
         def arr(name: str) -> np.ndarray:
             return np.asarray([float(row[name]) for row in group], dtype=np.float64)
 
-        ae = arr("angle_error")
-        ae180 = arr("angle_error_mod180")
+        rotation_error = arr("rotation_error_deg")
         psnr_anchor = arr("psnr_anchor")
         psnr_clean = arr("psnr_clean")
         psnr_anchor_finite_mean, psnr_anchor_median, psnr_anchor_num_inf = finite_stats(psnr_anchor)
@@ -696,13 +677,11 @@ def summarize(rows: list[dict[str, Any]], selected_angle_sign: str, method: str 
                 "method": method,
                 "alpha": alpha,
                 "num_samples": len(group),
-                "mean_angle_error": float(np.nanmean(ae)),
-                "median_angle_error": float(np.nanmedian(ae)),
-                "max_angle_error": float(np.nanmax(ae)),
-                "failure_rate_error_gt_1deg": float(np.nanmean(ae > 1.0)),
-                "failure_rate_error_gt_3deg": float(np.nanmean(ae > 3.0)),
-                "mean_angle_error_mod180": float(np.nanmean(ae180)),
-                "failure_rate_mod180_error_gt_3deg": float(np.nanmean(ae180 > 3.0)),
+                "mean_rotation_error_deg": float(np.nanmean(rotation_error)),
+                "median_rotation_error_deg": float(np.nanmedian(rotation_error)),
+                "max_rotation_error_deg": float(np.nanmax(rotation_error)),
+                "failure_rate_rotation_error_gt_1deg": float(np.nanmean(rotation_error > 1.0)),
+                "failure_rate_rotation_error_gt_3deg": float(np.nanmean(rotation_error > 3.0)),
                 "mean_psnr_anchor": float(np.nanmean(psnr_anchor)),
                 "mean_psnr_anchor_finite": psnr_anchor_finite_mean,
                 "median_psnr_anchor": psnr_anchor_median,
@@ -716,7 +695,6 @@ def summarize(rows: list[dict[str, Any]], selected_angle_sign: str, method: str 
                 "mean_ssim_clean": float(np.nanmean(ssim_clean)),
                 "median_ssim_clean": float(np.nanmedian(ssim_clean)),
                 "mean_runtime_ms": float(np.nanmean(arr("runtime_ms"))),
-                "selected_angle_sign": selected_angle_sign,
             }
         )
     return summary
@@ -725,7 +703,6 @@ def summarize(rows: list[dict[str, Any]], selected_angle_sign: str, method: str 
 def evaluate_diagnostic_alphas(
     image_paths: list[Path],
     args: argparse.Namespace,
-    selected_angle_sign: str,
 ) -> list[dict[str, Any]]:
     """Evaluate diff-feature diagnostics for the requested large alpha values."""
     rows: list[dict[str, Any]] = []
@@ -747,7 +724,6 @@ def evaluate_diagnostic_alphas(
                 x_anchor,
                 metadata,
                 int(args.num_r),
-                selected_angle_sign,
             )
             rows.append(
                 {
@@ -759,7 +735,7 @@ def evaluate_diagnostic_alphas(
     return rows
 
 
-def summarize_diagnostics(rows: list[dict[str, Any]], selected_angle_sign: str) -> list[dict[str, Any]]:
+def summarize_diagnostics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Aggregate diff-feature diagnostic rows by diagnostic alpha."""
     summary: list[dict[str, Any]] = []
     for alpha in sorted({float(row["diagnostic_alpha"]) for row in rows}):
@@ -777,7 +753,6 @@ def summarize_diagnostics(rows: list[dict[str, Any]], selected_angle_sign: str) 
                 "failure_rate_diff_error_gt_3deg": float(np.nanmean(errors > 3.0)),
                 "mean_diff_best_score": float(np.nanmean(scores)),
                 "mean_diff_corr_margin": float(np.nanmean(margins)),
-                "selected_angle_sign": selected_angle_sign,
             }
         )
     return summary
@@ -827,18 +802,18 @@ def plot_line(path: Path, rows: list[dict[str, Any]], x_name: str, y_name: str, 
 
 
 def plot_box_by_alpha(path: Path, rows: list[dict[str, Any]]) -> None:
-    """Save box plot of angle error grouped by alpha."""
+    """Save box plot of rotation error grouped by alpha."""
     plt = import_matplotlib()
     if plt is None:
-        save_placeholder_plot(path, "angle_error_box_by_alpha")
+        save_placeholder_plot(path, "rotation_error_box_by_alpha")
         return
     alphas = sorted({float(row["alpha"]) for row in rows})
-    data = [[float(row["angle_error"]) for row in rows if float(row["alpha"]) == a] for a in alphas]
+    data = [[float(row["rotation_error_deg"]) for row in rows if float(row["alpha"]) == a] for a in alphas]
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.boxplot(data, labels=[f"{a:g}" for a in alphas])
-    ax.set_title("angle_error_box_by_alpha")
+    ax.set_title("rotation_error_box_by_alpha")
     ax.set_xlabel("alpha")
-    ax.set_ylabel("angle_error")
+    ax.set_ylabel("rotation_error_deg")
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
@@ -889,7 +864,10 @@ def save_example_grid(path: Path, artifacts: dict[str, Any]) -> None:
     curve = np.asarray(artifacts["score_curve"], dtype=np.float32)
     ax.plot(curve)
     ax.set_title(
-        f"corr curve\nalpha={artifacts['alpha']}, gt={artifacts['theta_gt']}, hat={artifacts['theta_hat']:.2f}",
+        "corr curve\n"
+        f"alpha={artifacts['alpha']}, "
+        f"rotation_gt={artifacts['rotation_gt_deg']}, "
+        f"rotation_hat={artifacts['rotation_hat_deg']:.2f}",
         fontsize=9,
     )
     ax.grid(True, alpha=0.3)
@@ -901,12 +879,20 @@ def save_example_grid(path: Path, artifacts: dict[str, Any]) -> None:
 def save_plots(outdir: Path, rows: list[dict[str, Any]], summary: list[dict[str, Any]], example: dict[str, Any]) -> None:
     """Save required PNG outputs."""
     save_example_grid(outdir / "example_grid.png", example)
-    plot_line(outdir / "angle_error_vs_theta.png", rows, "theta_gt", "angle_error", "angle_error_vs_theta")
+    plot_line(
+        outdir / "rotation_error_vs_rotation.png",
+        rows,
+        "rotation_gt_deg",
+        "rotation_error_deg",
+        "rotation_error_vs_rotation",
+    )
+    plot_line(outdir / "angle_error_vs_theta.png", rows, "rotation_gt_deg", "rotation_error_deg", "rotation_error_vs_rotation")
+    plot_box_by_alpha(outdir / "rotation_error_box_by_alpha.png", rows)
     plot_box_by_alpha(outdir / "angle_error_box_by_alpha.png", rows)
     plot_summary_metric(
         outdir / "failure_rate_vs_alpha.png",
         summary,
-        ["failure_rate_error_gt_1deg", "failure_rate_error_gt_3deg"],
+        ["failure_rate_rotation_error_gt_1deg", "failure_rate_rotation_error_gt_3deg"],
         "failure_rate_vs_alpha",
     )
     plot_summary_metric(
@@ -939,7 +925,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--example-alpha", type=float, default=0.01)
     parser.add_argument("--example-theta", type=float, default=45.0)
     parser.add_argument("--max-images", type=int)
-    parser.add_argument("--angle-sign", choices=["auto", "raw", "neg"], default="raw")
+    parser.add_argument(
+        "--angle-sign",
+        choices=["auto", "raw", "neg"],
+        default="raw",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--method", choices=["two_pair", "multi_ringpair"], default="two_pair")
     parser.add_argument("--num-ring-pairs", type=int, default=12)
     parser.add_argument("--vae-footprint", action="store_true")
@@ -961,11 +952,8 @@ def main(argv: list[str] | None = None) -> int:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    selected_angle_sign = args.angle_sign
-    if args.angle_sign == "auto":
-        selected_angle_sign, _ = calibrate_angle_sign(args)
-    else:
-        print(f"[Angle sign calibration]\nselected sign = {selected_angle_sign}")
+    if args.angle_sign != "raw":
+        print(f"[Deprecated --angle-sign]\nignored value = {args.angle_sign}; using raw rotation convention")
 
     vae_encoder = None
     if args.vae_footprint:
@@ -1000,7 +988,6 @@ def main(argv: list[str] | None = None) -> int:
                     image_path,
                     float(alpha),
                     float(theta_gt),
-                    selected_angle_sign,
                     args,
                     modulation_grid,
                     metadata,
@@ -1018,24 +1005,24 @@ def main(argv: list[str] | None = None) -> int:
 
     if not rows:
         raise RuntimeError("no evaluation rows produced")
-    summary = summarize(rows, selected_angle_sign, method=args.method)
-    diagnostic_rows = evaluate_diagnostic_alphas(image_paths, args, selected_angle_sign)
-    diagnostic_summary = summarize_diagnostics(diagnostic_rows, selected_angle_sign)
+    summary = summarize(rows, method=args.method)
+    diagnostic_rows = evaluate_diagnostic_alphas(image_paths, args)
+    diagnostic_summary = summarize_diagnostics(diagnostic_rows)
     write_csv(outdir / "rotbind_results.csv", RESULT_FIELDS, rows)
     write_csv(outdir / "summary.csv", SUMMARY_FIELDS, summary)
     write_csv(outdir / "diagnostic_summary.csv", DIAGNOSTIC_SUMMARY_FIELDS, diagnostic_summary)
     save_plots(outdir, rows, summary, example_artifacts or {})
 
-    overall_mean = float(np.nanmean([float(row["angle_error"]) for row in rows]))
-    overall_fail3 = float(np.nanmean([float(row["angle_error"]) > 3.0 for row in rows]))
+    overall_mean = float(np.nanmean([float(row["rotation_error_deg"]) for row in rows]))
+    overall_fail3 = float(np.nanmean([float(row["rotation_error_deg"]) > 3.0 for row in rows]))
     mean_psnr_anchor = float(np.nanmean([float(row["psnr_anchor"]) for row in rows]))
     mean_ssim_anchor = float(np.nanmean([float(row["ssim_anchor"]) for row in rows]))
     mean_psnr_clean = float(np.nanmean([float(row["psnr_clean"]) for row in rows]))
     mean_ssim_clean = float(np.nanmean([float(row["ssim_clean"]) for row in rows]))
     print("[Evaluation summary]")
     print(f"num_samples = {len(rows)}")
-    print(f"mean angle error = {overall_mean:.6f}")
-    print(f"failure rate error > 3deg = {overall_fail3:.6f}")
+    print(f"mean rotation error = {overall_mean:.6f}")
+    print(f"failure rate rotation error > 3deg = {overall_fail3:.6f}")
     print(f"mean PSNR anchor / clean = {mean_psnr_anchor:.6f} / {mean_psnr_clean:.6f}")
     print(f"mean SSIM anchor / clean = {mean_ssim_anchor:.6f} / {mean_ssim_clean:.6f}")
     print(f"results = {outdir / 'rotbind_results.csv'}")
