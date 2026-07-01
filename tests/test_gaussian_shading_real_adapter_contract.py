@@ -1,0 +1,113 @@
+"""Contract tests for the real Gaussian Shading adapter boundary."""
+
+from __future__ import annotations
+
+from argparse import Namespace
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+from rotbind_anchor.gaussian_shading_adapter import detect_gaussian_shading, normalize_detection_result
+from rotbind_anchor.gaussian_shading_real_adapter import (
+    RealGaussianShadingPipeline,
+    build_gaussian_shading_pipeline,
+)
+
+
+class MockVae:
+    config = SimpleNamespace(scaling_factor=0.18215)
+
+    def encode(self, tensor):
+        class Dist:
+            mean = tensor
+
+            def mode(self):
+                return self.mean
+
+        return SimpleNamespace(latent_dist=Dist())
+
+
+class MockSdPipeline:
+    vae = MockVae()
+
+    def __init__(self) -> None:
+        self.forward_calls = 0
+        self._execution_device = "cpu"
+
+    def get_image_latents(self, image, sample=False):
+        return image.mean(dim=1, keepdim=True).repeat(1, 4, 1, 1)
+
+    def forward_diffusion(self, latents, text_embeddings, guidance_scale, num_inference_steps):
+        self.forward_calls += 1
+        return latents + 0.25
+
+
+class MockWatermark:
+    tau_onebit = 0.5
+    tau_bits = 0.75
+
+    def __init__(self) -> None:
+        self.seen_shape = None
+
+    def eval_watermark(self, zt):
+        self.seen_shape = tuple(zt.shape)
+        return 0.8
+
+
+def test_build_pipeline_requires_watermark_state_or_object() -> None:
+    args = Namespace(gs_watermark_state=None, gs_model_path=None, gs_config=None, gs_key=None)
+
+    with pytest.raises(ValueError, match="watermark state"):
+        build_gaussian_shading_pipeline(args)
+
+
+def test_real_pipeline_exposes_inversion_detection_and_vae_encoder() -> None:
+    sd_pipe = MockSdPipeline()
+    watermark = MockWatermark()
+    pipeline = RealGaussianShadingPipeline(
+        sd_pipeline=sd_pipe,
+        watermark=watermark,
+        text_embeddings=None,
+        num_inversion_steps=3,
+        guidance_scale=1.0,
+        device="cpu",
+    )
+
+    image = np.ones((8, 8, 3), dtype=np.float32) * 0.75
+    zt = pipeline.invert_to_zT(image)
+    det = pipeline.detect_gaussian_shading(zT=zt)
+
+    assert hasattr(pipeline, "vae_encoder")
+    assert sd_pipe.forward_calls == 1
+    assert zt.shape == (1, 4, 8, 8)
+    assert watermark.seen_shape == (1, 4, 8, 8)
+    assert det["detector_score"] == pytest.approx(0.8)
+    assert det["detector_success"] is True
+    assert det["detector_threshold"] == pytest.approx(0.5)
+    assert det["bit_accuracy"] == pytest.approx(0.8)
+    assert det["identification_accuracy"] == pytest.approx(1.0)
+    assert det["score_higher_is_better"] is True
+
+
+def test_detect_result_normalizes_through_common_adapter() -> None:
+    pipeline = RealGaussianShadingPipeline(
+        sd_pipeline=MockSdPipeline(),
+        watermark=MockWatermark(),
+        text_embeddings=None,
+        num_inversion_steps=1,
+        guidance_scale=1.0,
+        device="cpu",
+    )
+
+    result = detect_gaussian_shading(pipeline, zT=np.ones((1, 4, 4, 4), dtype=np.float32))
+
+    normalized = normalize_detection_result(result, pipeline)
+    assert set(normalized) >= {
+        "detector_score",
+        "detector_success",
+        "detector_threshold",
+        "bit_accuracy",
+        "identification_accuracy",
+        "score_higher_is_better",
+    }

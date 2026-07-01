@@ -174,6 +174,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gs-config", default=None)
     parser.add_argument("--gs-key", default=None)
     parser.add_argument("--gs-model-path", default=None)
+    parser.add_argument("--gs-watermark-state", default=None)
+    parser.add_argument("--gs-metadata", default=None)
+    parser.add_argument("--gs-code-root", default="Gaussian-Shading-master")
+    parser.add_argument("--gs-num-inversion-steps", type=int, default=None)
+    parser.add_argument("--gs-prompt", default="")
     parser.add_argument("--gs-threshold", type=float, default=None)
     parser.add_argument("--use-fake-gs-pipeline", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -327,6 +332,8 @@ def evaluate_one(
         "x_clean": x_clean,
         "zt_mse_anchor": zt_metrics["zt_mse_anchor"],
         "zt_mse_clean": zt_metrics["zt_mse_clean"],
+        "zt_shape": tuple(np.asarray(zt_base).shape),
+        "zt_dtype": str(np.asarray(zt_base).dtype),
         "detector_scores": [
             det_base["detector_score"],
             det_anchor["detector_score"],
@@ -474,6 +481,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print("[Gaussian Shading canonical RotBind summary]")
     print(f"num_images = {len(rows)}")
+    if example is not None:
+        print(f"zT shape / dtype = {example.get('zt_shape')} / {example.get('zt_dtype')}")
     print(f"results = {outdir / 'rotbind_gs_canonical_results.csv'}")
     print(f"summary = {outdir / 'summary.csv'}")
     return 0
