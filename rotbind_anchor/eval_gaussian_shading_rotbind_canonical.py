@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import os
 import sys
@@ -53,6 +54,9 @@ RESULT_FIELDS = [
     "key",
     "height",
     "width",
+    "gs_state_path",
+    "gs_seed",
+    "gs_prompt",
     "pixel_mse_anchor",
     "pixel_mse_clean",
     "psnr_anchor",
@@ -98,7 +102,7 @@ RESULT_FIELDS = [
     "runtime_ms",
 ]
 
-IDENTIFIER_FIELDS = {"image_id", "image_path", "method", "score_higher_is_better"}
+IDENTIFIER_FIELDS = {"image_id", "image_path", "method", "score_higher_is_better", "gs_state_path", "gs_prompt"}
 SUCCESS_FIELDS = ["detector_success_base", "detector_success_anchor", "detector_success_clean"]
 NUMERIC_SUMMARY_FIELDS = [
     field
@@ -206,6 +210,57 @@ def discover_images(args: argparse.Namespace) -> list[Path]:
     return paths
 
 
+def load_gs_metadata(metadata_path: str | Path) -> list[dict[str, Any]]:
+    """Load Gaussian Shading JSONL metadata rows."""
+    path = Path(metadata_path)
+    rows: list[dict[str, Any]] = []
+    with path.open() as f:
+        for line_no, line in enumerate(f, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            row = json.loads(text)
+            if not isinstance(row, dict):
+                raise ValueError(f"metadata row {line_no} is not an object: {path}")
+            rows.append(row)
+    return rows
+
+
+def build_state_lookup(metadata_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Build lookup keys for per-image watermark state metadata."""
+    lookup: dict[str, dict[str, Any]] = {}
+    for row in metadata_rows:
+        image_path = row.get("image_path")
+        if image_path:
+            path = Path(str(image_path))
+            lookup[str(path.resolve())] = row
+            lookup[path.name] = row
+        image_id = row.get("image_id")
+        if image_id:
+            lookup[str(image_id)] = row
+    return lookup
+
+
+def resolve_state_for_image(image_path: Path, state_lookup: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the metadata row matching an image path/name/id."""
+    keys = [str(image_path.resolve()), image_path.name, image_path.stem]
+    for key in keys:
+        if key in state_lookup:
+            return state_lookup[key]
+    return None
+
+
+def state_path_from_metadata_row(row: dict[str, Any], image_path: Path) -> Path:
+    """Return an existing watermark state path for a metadata row."""
+    raw_state = row.get("state_path")
+    if not raw_state:
+        raise ValueError(f"No state_path found in metadata for image: {image_path}")
+    state_path = Path(str(raw_state))
+    if not state_path.exists():
+        raise FileNotFoundError(f"Gaussian Shading watermark state not found for image {image_path}: {state_path}")
+    return state_path
+
+
 def get_vae_encoder(args: argparse.Namespace, gs_pipeline: Any) -> Any:
     """Return the VAE encoder used for scaled latent footprint metrics."""
     if hasattr(gs_pipeline, "vae_encoder"):
@@ -249,6 +304,8 @@ def evaluate_one(
     args: argparse.Namespace,
     gs_pipeline: Any,
     vae_encoder: Any,
+    metadata_row: dict[str, Any] | None = None,
+    state_path: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Evaluate one Gaussian Shading watermarked image."""
     start = time.perf_counter()
@@ -294,6 +351,9 @@ def evaluate_one(
         "key": int(args.key),
         "height": int(H),
         "width": int(W),
+        "gs_state_path": str(state_path) if state_path is not None else str(args.gs_watermark_state or ""),
+        "gs_seed": float(metadata_row["seed"]) if metadata_row is not None and metadata_row.get("seed") is not None else float("nan"),
+        "gs_prompt": str(metadata_row.get("prompt", "")) if metadata_row is not None else str(args.gs_prompt or ""),
         "pixel_mse_anchor": pixel_mse_anchor,
         "pixel_mse_clean": pixel_mse_clean,
         "psnr_anchor": psnr(x_base, x_anchor),
@@ -326,6 +386,11 @@ def evaluate_one(
         "identification_accuracy_clean": det_clean["identification_accuracy"],
         "runtime_ms": (time.perf_counter() - start) * 1000.0,
     }
+    if not bool(det_base["detector_success"]):
+        print(
+            "[Warning] Gaussian Shading baseline detector failed for "
+            f"{image_path}: score={det_base['detector_score']}, threshold={det_base['detector_threshold']}"
+        )
     artifacts = {
         "x_base": x_base,
         "x_anchor": x_anchor,
@@ -451,13 +516,37 @@ def main(argv: list[str] | None = None) -> int:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
+    image_paths = discover_images(args)
+    metadata_rows: list[dict[str, Any]] | None = None
+    state_lookup: dict[str, dict[str, Any]] = {}
+    if args.gs_metadata is not None:
+        metadata_rows = load_gs_metadata(args.gs_metadata)
+        state_lookup = build_state_lookup(metadata_rows)
+        first_row = resolve_state_for_image(image_paths[0], state_lookup)
+        if first_row is None:
+            raise ValueError(f"No state_path found in metadata for image: {image_paths[0]}")
+        first_state = state_path_from_metadata_row(first_row, image_paths[0])
+        if not args.gs_watermark_state:
+            args.gs_watermark_state = str(first_state)
+
     gs_pipeline = load_gaussian_shading_pipeline(args)
     vae_encoder = get_vae_encoder(args, gs_pipeline)
-    image_paths = discover_images(args)
 
     rows: list[dict[str, Any]] = []
     example: dict[str, Any] | None = None
     for path in image_paths:
+        metadata_row = None
+        state_path = None
+        if args.gs_metadata is not None:
+            metadata_row = resolve_state_for_image(path, state_lookup)
+            if metadata_row is None:
+                raise ValueError(f"No state_path found in metadata for image: {path}")
+            state_path = state_path_from_metadata_row(metadata_row, path)
+            if not hasattr(gs_pipeline, "set_watermark_state"):
+                raise ValueError("Pipeline does not support per-image watermark state switching")
+            gs_pipeline.set_watermark_state(state_path)
+        elif args.gs_watermark_state:
+            state_path = Path(str(args.gs_watermark_state))
         img = load_rgb_image(path, size=int(args.size), no_resize=bool(args.no_resize))
         row, artifacts = evaluate_one(
             img,
@@ -466,6 +555,8 @@ def main(argv: list[str] | None = None) -> int:
             args,
             gs_pipeline,
             vae_encoder,
+            metadata_row=metadata_row,
+            state_path=state_path,
         )
         rows.append(row)
         if example is None:

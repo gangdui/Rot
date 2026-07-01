@@ -46,10 +46,9 @@ class MockSdPipeline:
 
 
 class MockWatermark:
-    tau_onebit = 0.5
-    tau_bits = 0.75
-
-    def __init__(self) -> None:
+    def __init__(self, tau_onebit: float = 0.5, tau_bits: float = 0.75) -> None:
+        self.tau_onebit = tau_onebit
+        self.tau_bits = tau_bits
         self.seen_shape = None
 
     def eval_watermark(self, zt):
@@ -113,6 +112,22 @@ def test_detect_result_normalizes_through_common_adapter() -> None:
         "identification_accuracy",
         "score_higher_is_better",
     }
+
+
+def test_real_pipeline_set_watermark_updates_thresholds() -> None:
+    pipeline = RealGaussianShadingPipeline(
+        sd_pipeline=MockSdPipeline(),
+        watermark=MockWatermark(tau_onebit=0.5, tau_bits=0.75),
+        text_embeddings=None,
+        num_inversion_steps=1,
+        guidance_scale=1.0,
+        device="cpu",
+    )
+
+    pipeline.set_watermark(MockWatermark(tau_onebit=0.9, tau_bits=0.95))
+
+    assert pipeline.detector_threshold == pytest.approx(0.9)
+    assert pipeline.identification_threshold == pytest.approx(0.95)
 
 
 def test_transformers_clip_feature_extractor_compat_aliases_top_level(monkeypatch) -> None:

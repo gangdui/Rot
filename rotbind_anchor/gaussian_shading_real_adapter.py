@@ -44,6 +44,19 @@ class RealGaussianShadingPipeline:
         self.identification_threshold = float(getattr(watermark, "tau_bits", float("nan")))
         self.vae_encoder = vae_encoder or _GaussianShadingVaeEncoder(sd_pipeline.vae, device=self.device)
 
+    def set_watermark(self, watermark: Any) -> None:
+        """Switch only the Gaussian Shading watermark state."""
+        if not hasattr(watermark, "eval_watermark"):
+            raise TypeError("Gaussian Shading watermark state must expose eval_watermark")
+        self.watermark = watermark
+        self.detector_threshold = float(getattr(watermark, "tau_onebit", float("nan")))
+        self.identification_threshold = float(getattr(watermark, "tau_bits", float("nan")))
+
+    def set_watermark_state(self, state_path: str | Path) -> None:
+        """Load and switch to a per-image Gaussian Shading watermark state."""
+        watermark = load_watermark_state(Path(state_path), device=self.device)
+        self.set_watermark(watermark)
+
     def invert_to_zT(self, image: np.ndarray) -> np.ndarray:
         """Invert an RGB float image to the z_T representation used by GS detection."""
         import torch
