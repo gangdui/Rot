@@ -27,7 +27,8 @@ APPROVED_CURRENT_DIRS = {
     "current/rotation_sync_same_size_zfill_vae",
     "current/embedding_process_same_size_zfill_alpha015",
     "current/anchor_imperceptibility_two_pair_alpha015",
-    "current/gaussian_shading_canonical_rotbind_alpha015",
+    "current/gaussian_shading_canonical_rotbind_alpha015_real10",
+    "current/gaussian_shading_quality_rotbind_alpha015_real10",
 }
 
 

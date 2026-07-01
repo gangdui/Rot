@@ -25,11 +25,16 @@ method-specific directory labels for this benchmark rotation setting.
   Canonical two-pair anchor imperceptibility and removal quality at
   `alpha=0.15`.
 
-- `current/gaussian_shading_canonical_rotbind_alpha015`
-  Gaussian Shading canonical RotBind anchor-removal necessity experiment. This
-  run has no rotation attack and evaluates pixel, scaled VAE latent, Gaussian
-  Shading inversion zT, and detector metrics for baseline, anchor, and explicit
-  anchor-removal variants.
+- `current/gaussian_shading_canonical_rotbind_alpha015_real10`
+  Gaussian Shading canonical RotBind anchor-removal necessity experiment on the
+  real 10-image Gaussian Shading smoke dataset. This run has no rotation attack
+  and evaluates pixel, scaled VAE latent, Gaussian Shading inversion zT, and
+  detector metrics for baseline, anchor, and explicit anchor-removal variants.
+
+- `current/gaussian_shading_quality_rotbind_alpha015_real10`
+  Paper-aligned Gaussian Shading + RotBind image quality evaluation on the real
+  10-image Gaussian Shading smoke dataset. This run reports RotBind incremental
+  paired quality metrics and generation/distribution quality metrics.
 
 ## Rotation Attack Definition
 

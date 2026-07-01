@@ -8,3 +8,6 @@ experiments/archive_debug/**
 !experiments/archive_debug/**/summary.csv
 !experiments/archive_debug/**/alpha_method_summary.csv
 !experiments/archive_debug/**/README.md
+
+# Local model checkpoints
+/checkpoints/
