@@ -18,6 +18,8 @@ from typing import Any
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from rotbind_anchor.gaussian_shading_real_adapter import _ensure_transformers_clip_feature_extractor_compat
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
@@ -159,6 +161,7 @@ def import_gaussian_shading_modules(gs_code_root: str) -> dict[str, Any]:
     root_text = str(gs_root)
     if root_text not in sys.path:
         sys.path.insert(0, root_text)
+    _ensure_transformers_clip_feature_extractor_compat()
 
     from diffusers import DPMSolverMultistepScheduler
     from inverse_stable_diffusion import InversableStableDiffusionPipeline

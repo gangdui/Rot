@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -12,6 +13,7 @@ from rotbind_anchor.gaussian_shading_adapter import detect_gaussian_shading, nor
 from rotbind_anchor.gaussian_shading_real_adapter import (
     RealGaussianShadingPipeline,
     build_gaussian_shading_pipeline,
+    _ensure_transformers_clip_feature_extractor_compat,
 )
 
 
@@ -111,3 +113,29 @@ def test_detect_result_normalizes_through_common_adapter() -> None:
         "identification_accuracy",
         "score_higher_is_better",
     }
+
+
+def test_transformers_clip_feature_extractor_compat_aliases_top_level(monkeypatch) -> None:
+    class FakeImageProcessor:
+        pass
+
+    fake_transformers = SimpleNamespace(CLIPImageProcessor=FakeImageProcessor)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    _ensure_transformers_clip_feature_extractor_compat()
+
+    assert fake_transformers.CLIPFeatureExtractor is FakeImageProcessor
+
+
+def test_transformers_clip_feature_extractor_compat_aliases_clip_submodule(monkeypatch) -> None:
+    class FakeImageProcessor:
+        pass
+
+    fake_transformers = SimpleNamespace()
+    fake_clip_module = SimpleNamespace(CLIPImageProcessor=FakeImageProcessor)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "transformers.models.clip.image_processing_clip", fake_clip_module)
+
+    _ensure_transformers_clip_feature_extractor_compat()
+
+    assert fake_transformers.CLIPFeatureExtractor is FakeImageProcessor

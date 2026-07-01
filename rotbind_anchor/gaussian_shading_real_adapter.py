@@ -158,6 +158,7 @@ def load_watermark_state(path: Path, device: str = "cpu") -> Any:
 def _load_reference_sd_pipeline(args: Any, model_path: str, device: str) -> Any:
     """Load the original Gaussian Shading InversableStableDiffusionPipeline."""
     _ensure_gs_code_root(getattr(args, "gs_code_root", "Gaussian-Shading-master"))
+    _ensure_transformers_clip_feature_extractor_compat()
 
     import torch
     from diffusers import DPMSolverMultistepScheduler
@@ -183,6 +184,33 @@ def _ensure_gs_code_root(gs_code_root: str | Path) -> Path:
     if root_text not in sys.path:
         sys.path.insert(0, root_text)
     return gs_root
+
+
+def _ensure_transformers_clip_feature_extractor_compat() -> None:
+    """Alias CLIPFeatureExtractor for newer transformers versions if needed."""
+    import importlib
+    import transformers
+
+    if hasattr(transformers, "CLIPFeatureExtractor"):
+        return
+    clip_cls = getattr(transformers, "CLIPImageProcessor", None)
+    if clip_cls is None:
+        for module_name, attr_name in (
+            ("transformers.models.clip.image_processing_clip", "CLIPImageProcessor"),
+            ("transformers.models.clip.feature_extraction_clip", "CLIPFeatureExtractor"),
+        ):
+            try:
+                module = importlib.import_module(module_name)
+                clip_cls = getattr(module, attr_name)
+                break
+            except Exception:
+                continue
+    if clip_cls is None:
+        raise ImportError(
+            "Gaussian Shading requires transformers.CLIPFeatureExtractor, but this "
+            "environment exposes neither CLIPFeatureExtractor nor CLIPImageProcessor."
+        )
+    transformers.CLIPFeatureExtractor = clip_cls
 
 
 def _resolve_device(device: str) -> str:
