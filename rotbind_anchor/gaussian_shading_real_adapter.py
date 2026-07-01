@@ -113,6 +113,7 @@ def build_gaussian_shading_pipeline(args: Any) -> RealGaussianShadingPipeline:
         raise ValueError("Gaussian Shading real adapter requires --gs-model-path")
 
     device = _resolve_device(getattr(args, "device", "auto"))
+    _ensure_gs_code_root(getattr(args, "gs_code_root", "Gaussian-Shading-master"))
     watermark = load_watermark_state(Path(state_path), device=device)
     sd_pipeline = _load_reference_sd_pipeline(args, model_path, device)
     prompt = getattr(args, "gs_prompt", "")
@@ -156,10 +157,7 @@ def load_watermark_state(path: Path, device: str = "cpu") -> Any:
 
 def _load_reference_sd_pipeline(args: Any, model_path: str, device: str) -> Any:
     """Load the original Gaussian Shading InversableStableDiffusionPipeline."""
-    gs_root = Path(getattr(args, "gs_code_root", "Gaussian-Shading-master")).resolve()
-    if not gs_root.exists():
-        raise FileNotFoundError(f"Gaussian Shading code root not found: {gs_root}")
-    sys.path.insert(0, str(gs_root))
+    _ensure_gs_code_root(getattr(args, "gs_code_root", "Gaussian-Shading-master"))
 
     import torch
     from diffusers import DPMSolverMultistepScheduler
@@ -175,6 +173,16 @@ def _load_reference_sd_pipeline(args: Any, model_path: str, device: str) -> Any:
     )
     pipe.safety_checker = None
     return pipe.to(device)
+
+
+def _ensure_gs_code_root(gs_code_root: str | Path) -> Path:
+    gs_root = Path(gs_code_root).resolve()
+    if not gs_root.exists():
+        raise FileNotFoundError(f"Gaussian Shading code root not found: {gs_root}")
+    root_text = str(gs_root)
+    if root_text not in sys.path:
+        sys.path.insert(0, root_text)
+    return gs_root
 
 
 def _resolve_device(device: str) -> str:
